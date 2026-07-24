@@ -30,7 +30,8 @@ class Detection:
     label: str
     center: Tuple[float, float]
     radius: float
-    area: float
+    area: float                      # пиксели
+    size_percent: float              # доля площади кадра — в этих же единицах задан порог
     bbox: Tuple[int, int, int, int]  # x, y, w, h
     circularity: float
     solidity: float
@@ -97,23 +98,24 @@ class AppleDetector:
     # ------------------------------------------------------------ детекция
 
     def _contour_detection(
-        self, contour: np.ndarray, mask: np.ndarray, profile: ColorProfile, scale: float
+        self, contour: np.ndarray, profile: ColorProfile, scale: float, frame_area: float
     ) -> Optional[Detection]:
         area = float(cv2.contourArea(contour))
         area_full = area * scale * scale  # площадь в пикселях исходного кадра
-        if area_full < profile.min_area or area_full > profile.max_area:
+        min_area, max_area = profile.area_limits(frame_area)
+        if area_full < min_area or area_full > max_area:
             return None
 
         perimeter = float(cv2.arcLength(contour, True))
         if perimeter <= 0:
             return None
         circularity = 4.0 * math.pi * area / (perimeter * perimeter)
-        if circularity < profile.min_circularity:
+        if circularity < profile.min_roundness:
             return None
 
         hull_area = float(cv2.contourArea(cv2.convexHull(contour)))
         solidity = area / hull_area if hull_area > 0 else 0.0
-        if solidity < profile.min_solidity:
+        if solidity < profile.min_smoothness:
             return None
 
         (cx, cy), radius = cv2.minEnclosingCircle(contour)
@@ -121,7 +123,7 @@ class AppleDetector:
         # Насколько плотно маска заполняет описанную окружность: у яблока — почти
         # полностью, у вытянутой полосы или ломаного пятна — заметно меньше.
         fill = area / circle_area if circle_area > 0 else 0.0
-        if fill < profile.min_fill:
+        if fill < profile.min_filling:
             return None
 
         x, y, w, h = cv2.boundingRect(contour)
@@ -135,6 +137,7 @@ class AppleDetector:
             center=(cx * scale, cy * scale),
             radius=radius * scale,
             area=area_full,
+            size_percent=100.0 * area_full / frame_area if frame_area else 0.0,
             bbox=(int(x * scale), int(y * scale), int(w * scale), int(h * scale)),
             circularity=circularity,
             solidity=solidity,
@@ -151,6 +154,7 @@ class AppleDetector:
 
         work, scale = self._preprocess(frame)
         hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
+        frame_area = float(frame.shape[0] * frame.shape[1])
 
         found: List[Detection] = []
         self.last_masks = {}
@@ -161,7 +165,7 @@ class AppleDetector:
 
             per_color: List[Detection] = []
             for contour in contours:
-                det = self._contour_detection(contour, mask, profile, scale)
+                det = self._contour_detection(contour, profile, scale, frame_area)
                 if det is not None:
                     per_color.append(det)
             per_color.sort(key=lambda d: d.area, reverse=True)

@@ -30,7 +30,9 @@ def draw_detections(
         cv2.drawMarker(canvas, (cx, cy), color, cv2.MARKER_CROSS, 14, 2)
 
         claimed = registry is not None and det.color in registry.claimed_colors
-        text = f"{det.color} {det.score:.2f}"
+        # Размер показан в тех же процентах, в которых задан порог min_size_percent,
+        # чтобы значение из кадра можно было прямо перенести в конфиг.
+        text = f"{det.color} {det.score:.2f} {det.size_percent:.2f}%"
         if claimed:
             text += " [OK]"
         elif registry is not None:
