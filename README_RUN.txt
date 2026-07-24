@@ -7,59 +7,49 @@
    cd ~/Archipelago2026
 
 
-ВАРИАНТ 1: head_drone.py — миссия лидера одним файлом
+ПРОВЕРКИ БЕЗ ПОЛЁТА (пропеллеры сняты)
 
-4. Проверка камеры и распознавания БЕЗ полёта:
-
-   python3 head_drone.py
-
-   Размеченный поток публикуется в /out_detection.
-
-5. Полётный запуск только после проверки камеры и направления коррекции:
-
-   python3 head_drone.py --fly
-
-Основные параметры:
-
-   --alt 1.5              высота полёта, м
-   --marker-step 1.0      расстояние между центрами соседних ArUco, м
-   --search-speed 0.35    скорость перелёта между узлами, м/с
-   --apple-hold 2.0       зависание над «яблоком», с
-
-Пример:
-
-   python3 head_drone.py --fly --alt 1.5 --marker-step 1.0
-
-Если дрон корректируется от цели, а не к ней:
-
-   --image-x-sign 1 --image-y-sign 1
-
-
-ВАРИАНТ 2: snake_mission — миссия лидера пакетом
-
-4. Что видит камера над полем меток (пропеллеры сняты):
+4. Что видит камера над полем меток — ID, раскладка, полоса обзора:
 
    python3 snake_mission/tools/marker_check.py --duration 30
 
-5. Расчёт маршрута без полёта — покрытие поля и оценка времени:
+5. Распознаются ли «яблоки» под камерой:
+
+   python3 apple_vision/run_apple_detect.py --duration 60
+
+   Размеченный поток публикуется в /out_detection.
+
+6. Расчёт маршрута без полёта — покрытие поля и оценка времени:
 
    python3 snake_mission/run_leader.py --dry-run --start 42
 
-6. Полётный запуск:
+
+ПОЛЁТ
+
+7. Зачётный запуск:
 
    python3 snake_mission/run_leader.py
-   python3 snake_mission/run_leader.py --alt 2.0 --no-land
 
-Отличия двух вариантов и выбор между ними — в README.md.
+Основные ключи:
+
+   --alt 2.5        высота поиска, м (потолок 3.0)
+   --speed 0.6      скорость перелёта между метками, м/с
+   --no-land        не садиться: зависнуть на старте для этапа фигуры
+   --strategy       auto | aruco_frame | visual — как лететь к метке
+
+Пример:
+
+   python3 snake_mission/run_leader.py --alt 2.0 --no-land
 
 
 СТРУКТУРА
 
-   apple_vision/     распознавание «яблок», общая основа для обеих программ
-   snake_mission/    миссия лидера пакетом: поле, маршрут, навигация по меткам
-   head_drone.py     миссия лидера одним файлом
+   snake_mission/    миссия лидера: поле, маршрут, навигация по меткам
+   apple_vision/     распознавание «яблок»
 
-Пороги цвета «яблок» лежат в apple_vision/config/apples.yaml и используются обеими
-программами. Под свет зала их надо переснять на месте:
+Пороги цвета «яблок» лежат в apple_vision/config/apples.yaml. Под свет зала их надо
+переснять на месте:
 
    python3 apple_vision/tools/calibrate_hsv.py --grab кадр.png
+
+Подробности — в README.md, snake_mission/README.md и apple_vision/README.md.
