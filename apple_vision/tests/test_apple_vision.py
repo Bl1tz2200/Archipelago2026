@@ -141,6 +141,54 @@ def test_calibration_survives_background_in_roi():
         assert abs(detections[0].center[0] - 320) < 12
 
 
+def test_saving_keeps_comments_and_values():
+    """Сохранение из окна не должно превращать конфиг в нечитаемый список чисел."""
+    import tempfile
+
+    from apple_vision import save_config
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "apples.yaml")
+        save_config(CFG, path)
+        text = open(path, encoding="utf-8").read()
+        assert text.count("#") > 20, "комментарии потерялись при сохранении"
+        assert "min_size_percent" in text and "{lower: [" in text, "формат стал нечитаемым"
+
+        again = load_config(path)
+        assert [p.name for p in again.profiles] == [p.name for p in CFG.profiles]
+        assert again.profile("red").ranges == CFG.profile("red").ranges
+        assert again.registry.confirm_frames == CFG.registry.confirm_frames
+        assert again.camera.calibration_file == CFG.camera.calibration_file
+
+
+def test_old_field_names_still_load():
+    """Конфиг с прежними именами (min_area в пикселях) читается без правки руками."""
+    from apple_vision.config import ColorProfile
+
+    profile = ColorProfile.from_dict({
+        "name": "red",
+        "ranges": [{"lower": [0, 110, 70], "upper": [8, 255, 255]}],
+        "min_area": 400, "max_area": 120000,
+        "min_circularity": 0.55, "min_solidity": 0.8, "min_fill": 0.45,
+    })
+    assert abs(profile.min_size_percent - 0.13) < 0.02   # 400 px² при 640x480
+    assert profile.min_roundness == 0.55 and profile.min_filling == 0.45
+
+
+def test_size_threshold_is_resolution_independent():
+    """Один и тот же порог в процентах работает на кадрах разного размера."""
+    percents = []
+    for size in ((640, 480), (1280, 960), (1920, 1440)):     # одна пропорция, разный масштаб
+        radius = int(size[0] * 0.055)
+        frame = make_frame([("red", (size[0] // 2, size[1] // 2), radius)], size=size)
+        detections = AppleDetector(CFG).detect(frame)
+        assert detections, f"{size}: яблоко не найдено"
+        percents.append(detections[0].size_percent)
+
+    # Яблоко занимает одну и ту же долю кадра — значит и порог переносится без правки.
+    assert max(percents) - min(percents) < 0.1, percents
+
+
 def _main() -> int:
     tests = [(n, o) for n, o in sorted(globals().items()) if n.startswith("test_") and callable(o)]
     failed = 0

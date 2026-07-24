@@ -30,8 +30,8 @@ def report(name: str, detections) -> None:
         return
     for d in detections:
         print(f"{name}: {d.color:<7} центр ({d.center[0]:6.1f},{d.center[1]:6.1f})  "
-              f"r={d.radius:5.1f}  S={d.area:8.0f}px²  circ={d.circularity:.2f} "
-              f"solid={d.solidity:.2f} fill={d.fill:.2f} score={d.score:.2f}")
+              f"размер {d.size_percent:5.2f}% кадра  круглость {d.circularity:.2f}  "
+              f"ровность {d.solidity:.2f}  плотность {d.fill:.2f}  оценка {d.score:.2f}")
 
 
 def run_images(paths: List[str], detector: AppleDetector, out_dir: str, masks: bool) -> int:

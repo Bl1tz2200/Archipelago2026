@@ -12,6 +12,7 @@
 Клавиши в окне:
     1 2 3   выбрать цвет для калибровки (red / green / yellow)
     c       откалибровать выбранный цвет по рамке в центре кадра
+    + -     порог минимального размера: ловит лишнее — увеличить
     s       сохранить подобранные пороги в config/apples.yaml
     m       показать/скрыть маски по цветам
     r       сбросить зачёт (как новая попытка)
@@ -68,8 +69,10 @@ def draw_hud(canvas: np.ndarray, vision: AppleVision, color: str, dirty: bool,
     x, y, w, h = centre_roi(canvas)
     cv2.rectangle(canvas, (x, y), (x + w, y + h), (180, 180, 180), 1)
 
+    size = vision.config.profiles[0].min_size_percent if vision.config.profiles else 0.0
     lines = [
         f"калибровка: {color}   1/2/3 - цвет, c - взять из рамки" + ("  *не сохранено" if dirty else ""),
+        f"min размер: {size:.2f}% кадра   +/- изменить (ловит лишнее -> больше)",
         "s - сохранить в конфиг | m - маски | r - сброс зачёта | q - выход",
     ]
     if hint:
@@ -149,6 +152,17 @@ def run_window(cap: cv2.VideoCapture, vision: AppleVision, args) -> int:
             hint, hint_until = f"сохранено: {path}", time.time() + 3
             dirty = False
             print(hint, flush=True)
+        elif key in (ord("+"), ord("="), ord("-"), ord("_")):
+            # Порог размера общий для всех цветов: яблоки на поле примерно одинаковы.
+            step = 1.25 if key in (ord("+"), ord("=")) else 1 / 1.25
+            for profile in vision.config.profiles:
+                profile.min_size_percent = round(
+                    min(20.0, max(0.005, profile.min_size_percent * step)), 3)
+            vision.detector = AppleDetector(vision.config,
+                                            [p.name for p in vision.detector.profiles])
+            dirty = True
+            hint, hint_until = (f"min размер: {vision.config.profiles[0].min_size_percent:.3f}% кадра",
+                                time.time() + 2)
         elif key == ord("m"):
             show_masks = not show_masks
         elif key == ord("r"):
@@ -215,14 +229,19 @@ def main() -> int:
     p.add_argument("--colors", default="", help="ограничить цвета, например red,green")
     p.add_argument("--web", action="store_true", help="без окна: MJPEG в браузере")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--no-mirror", dest="mirror", action="store_false",
-                   help="не зеркалить картинку")
+    p.add_argument("--mirror", action="store_true",
+                   help="зеркалить картинку по горизонтали (как в зеркале)")
     p.add_argument("--margin-h", type=int, default=8, help="запас по оттенку при калибровке")
     p.add_argument("--margin-sv", type=int, default=60, help="запас по S/V при калибровке")
     p.add_argument("--snapshot", help="сохранить один кадр с разметкой и выйти")
+    p.add_argument("--min-size", type=float, default=None,
+                   help="минимальный размер яблока, %% площади кадра (для вебки обычно 0.5..2)")
     args = p.parse_args()
 
     cfg = load_config(args.config) if args.config else load_config()
+    if args.min_size is not None:
+        for profile in cfg.profiles:
+            profile.min_size_percent = args.min_size
     colors = tuple(c.strip() for c in args.colors.split(",") if c.strip())
     vision = AppleVision(drone=None, config=cfg, colors=colors, publish=False, verbose=True)
 
