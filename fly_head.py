@@ -62,6 +62,8 @@ MARKER_M = 0.3      # сторона метки, м — по ней кадр п�
 TOL = 0.08          # «над целью»: смещение меньше этой доли диагонали кадра
 TRIES = 8           # попыток довести дрон до одной метки, дальше — следующий узел
 ALT_FIX = 0.3       # предел поправки высоты за одну команду, м
+LOOK_UP = 0.3       # на столько подняться, если меток не видно вовсе, м
+BLIND_FRAMES = 2    # столько кадров подряд без единой метки — и поднимаемся
 
 # Приложение 3: фигура назначается по ID маркера того угла, откуда стартуем.
 # Угол заранее не сообщается — читаем метку под дроном сразу после взлёта.
@@ -132,7 +134,11 @@ def look(drone):
 
 
 def markers(img):
-    """Метки на кадре: {ID: (x, y, сторона в пикселях)}."""
+    """Метки на кадре: {ID: (x, y, сторона в пикселях, поворот в радианах)}.
+
+    Поворот — угол верхней стороны квадрата в кадре. Метки на поле уложены
+    одинаково, поэтому их поворот показывает, как повёрнут сам дрон.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if _ARUCO is not None:
         corners, ids, _ = _ARUCO.detectMarkers(gray)
@@ -147,8 +153,9 @@ def markers(img):
         x, y = pts.mean(axis=0)
         # Сторона метки — среднее четырёх рёбер квадрата. Это и есть масштаб кадра.
         side = float(np.mean([np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]))
+        edge = pts[1] - pts[0]
         if side > 1.0:
-            seen[int(mid)] = (float(x), float(y), side)
+            seen[int(mid)] = (float(x), float(y), side, math.atan2(float(edge[1]), float(edge[0])))
     return seen
 
 
@@ -235,6 +242,7 @@ def nearest(seen, center):
 # взлёта и дальше каждой командой возвращаемся к ней. Телеметрия не нужна.
 
 SIDE_REF = 0.0      # сторона метки на рабочей высоте, пиксели (замер после взлёта)
+ANGLE_REF = None    # поворот меток в кадре на взлёте — «нос смотрит туда же, что и тогда»
 
 
 def alt_by_side(side):
@@ -255,13 +263,58 @@ def hold_alt(side):
     return max(-ALT_FIX, min(ALT_FIX, correction))
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  КУРС — тоже по метке
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Смещения, посчитанные ПО КАДРУ (метка левее/выше центра), в поправке не
+# нуждаются: кадр поворачивается вместе с дроном. А вот смещения ПО КАРТЕ
+# («цель на два узла вперёд») заданы в осях поля — если дрон отвернуло, их надо
+# развернуть в оси корпуса. Насколько отвернуло, показывает поворот метки в
+# кадре: на поле они уложены одинаково.
+
+
+def turn_error(angle):
+    """На сколько дрон отвернулся от курса взлёта, радианы (−π…π)."""
+    if ANGLE_REF is None:
+        return 0.0
+    return (angle - ANGLE_REF + math.pi) % (2 * math.pi) - math.pi
+
+
+def to_body(forward, left, angle):
+    """Вектор из осей поля в оси корпуса с учётом того, что дрон отвернуло."""
+    error = turn_error(angle)
+    if abs(error) < math.radians(3):        # мелочь, не крутим
+        return forward, left
+    c, s = math.cos(error), math.sin(error)
+    return forward * c + left * s, -forward * s + left * c
+
+
+def grid_step(seen, side):
+    """Шаг сетки в метрах, измеренный по двум соседним меткам в кадре.
+
+    Избавляет от ручной подгонки STEP_M: расстояние между соседями в пикселях,
+    переведённое масштабом метки, и есть шаг площадки. Нет пары соседей — 0.0.
+    """
+    for a in seen:
+        for b in seen:
+            if a >= b:
+                continue
+            (acol, arow), (bcol, brow) = node(a), node(b)
+            if abs(acol - bcol) + abs(arow - brow) != 1:
+                continue                    # не соседи по сетке
+            gap = math.hypot(seen[a][0] - seen[b][0], seen[a][1] - seen[b][1])
+            return gap * MARKER_M / side
+    return 0.0
+
+
 def place(base, x, y):
     """Где точка кадра лежит на поле: (столбец, строка) в узлах сетки, дробные.
 
     Отсчёт от видимой метки: сторона метки задаёт масштаб, её ID — узел. Столбцы
     растут вправо по кадру, строки — вверх, ровно как в перелётах (см. `goto`).
     """
-    base_id, (bx, by, side) = base
+    base_id, (bx, by, side, _) = base
     scale = MARKER_M / side / STEP_M          # пиксель → доля шага сетки
     col, row = node(base_id)
     return col + (x - bx) * scale, row - (y - by) * scale
@@ -345,7 +398,7 @@ def settle(drone):
             time.sleep(0.3)
             continue
 
-        mid, (x, y, side) = base
+        mid, (x, y, side, _) = base
         if previous is not None and previous[0] == mid:
             px, py, pside = previous[1]
             drift = math.hypot(x - px, y - py) / side      # сдвиг в долях метки
@@ -431,6 +484,7 @@ def watch(drone, img, found):
 
 def goto(drone, target, found):
     """Долететь до метки `target`, попутно высматривая яблоки. True — встали над ней."""
+    blind = 0
     for _ in range(TRIES):
         img = look(drone)
         if img is None:
@@ -447,7 +501,7 @@ def goto(drone, target, found):
             continue
 
         if target in seen:
-            x, y, side = seen[target]
+            x, y, side, _ = seen[target]
             if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
                 print(f"          над меткой {target}", flush=True)
                 # Встали над меткой — заодно вернём высоту, если её увело.
@@ -463,17 +517,28 @@ def goto(drone, target, found):
 
         # Цели в кадре нет — идём к ней по карте от той метки, что видно.
         if base is None:
-            time.sleep(0.5)
+            # Не видно вообще ничего: поднимаемся, чтобы расширить обзор. Как только
+            # метка найдётся, hold_alt сам вернёт дрон на рабочую высоту.
+            blind += 1
+            if blind >= BLIND_FRAMES:
+                print("          меток не видно — поднимаемся осмотреться", flush=True)
+                fly(drone, 0.0, 0.0, LOOK_UP)
+                blind = 0
+            else:
+                time.sleep(0.5)
             continue
-        base_id, (x, y, side) = base
+
+        blind = 0
+        base_id, (x, y, side, angle) = base
         scale = MARKER_M / side
         dcol = node(target)[0] - node(base_id)[0]
         drow = node(target)[1] - node(base_id)[1]
         # Строки поля идут вперёд по корпусу, столбцы — влево; к смещению по сетке
         # добавляем то, насколько сама опорная метка сдвинута от центра кадра.
+        forward, left = to_body(drow * STEP_M, -dcol * STEP_M, angle)
         fly(drone,
-            drow * STEP_M - (y - cy) * scale,
-            -dcol * STEP_M - (x - cx) * scale,
+            forward - (y - cy) * scale,
+            left - (x - cx) * scale,
             hold_alt(side))
 
     print(f"          узел {target} пропущен", flush=True)
@@ -485,9 +550,11 @@ def scan(drone):
 
     Здесь же замеряется эталон высоты: сторона метки в кадре сразу после взлёта —
     это «как выглядит поле с рабочей высоты ALT». Замер делается по спокойному
-    кадру: снятый на раскачке, он увёл бы высоту на весь оставшийся полёт.
+    кадру. Заодно снимаются ещё два эталона: ANGLE_REF — поворот меток в кадре,
+    то есть курс, от которого дальше считается отклонение, и STEP_M — шаг сетки
+    площадки, измеренный по двум соседним меткам.
     """
-    global SIDE_REF
+    global SIDE_REF, ANGLE_REF, STEP_M
     calm_side = settle(drone)
     for _ in range(TRIES):
         img = look(drone)
@@ -502,10 +569,18 @@ def scan(drone):
         under_sight = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))
         under = under_sight[0]
         SIDE_REF = calm_side or under_sight[1][2]
+        ANGLE_REF = under_sight[1][3]
+        measured = grid_step(seen, SIDE_REF)
         fruit = ", ".join(name for name, _, _ in apples(img))
         print("=" * 54, flush=True)
         print(f">>> СТАРТОВЫЙ МАРКЕР: {under}  (узел {node(under)})", flush=True)
         print(f">>> ВЫСОТА {ALT} м = метка {SIDE_REF:.0f} px в кадре (эталон)", flush=True)
+        if measured:
+            print(f">>> ШАГ СЕТКИ: {measured:.2f} м (замер по соседним меткам, "
+                  f"в настройках было {STEP_M:.2f})", flush=True)
+            STEP_M = measured
+        else:
+            print(f">>> ШАГ СЕТКИ: соседей в кадре нет, оставляем {STEP_M:.2f} м", flush=True)
         if under in FIGURES:
             print(f">>> НАЗНАЧЕННАЯ ФИГУРА: {FIGURES[under]}", flush=True)
         else:
