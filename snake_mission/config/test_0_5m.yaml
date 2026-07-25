@@ -1,6 +1,6 @@
 # Тестовый профиль: пролёт всего поля змейкой на фиксированной высоте 0.5 м,
 # без набора высоты и без обрыва по 3-минутному регламентному бюджету.
-# Запуск: ./run.sh mission --config snake_mission/config/test_0_5m.yaml
+# Запуск: python3 run.py mission --config snake_mission/config/test_0_5m.yaml
 flight:
   altitude: 0.5          # рабочая высота теста, м
   speed: 0.3             # медленнее дефолта (0.6) — первый пролёт на малой высоте
