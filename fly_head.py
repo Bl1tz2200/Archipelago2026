@@ -51,6 +51,7 @@ MARKER_M = 0.3      # сторона метки, м — по ней кадр п�
 
 TOL = 0.08          # «над целью»: смещение меньше этой доли диагонали кадра
 TRIES = 8           # попыток довести дрон до одной метки, дальше — следующий узел
+ALT_FIX = 0.3       # предел поправки высоты за одну команду, м
 
 # Приложение 3: фигура назначается по ID маркера того угла, откуда стартуем.
 # Угол заранее не сообщается — читаем метку под дроном сразу после взлёта.
@@ -175,12 +176,14 @@ def apples(img):
     return found
 
 
-def report(target, seen, fruit):
-    """Обстановка в консоль: что вокруг видно и есть ли яблоки."""
+def report(target, seen, fruit, side=0.0):
+    """Обстановка в консоль: что вокруг видно, есть ли яблоки и на какой мы высоте."""
     ids = " ".join(str(i) for i in sorted(seen)) if seen else "не видно"
     names = ", ".join(name for name, _, _ in fruit)
+    now = alt_by_side(side)
     print(f"цель {target:2d} | метки: {ids} | "
-          f"{'яблоки: ' + names if names else 'яблок нет'}", flush=True)
+          f"{'яблоки: ' + names if names else 'яблок нет'}"
+          f"{f' | h≈{now:.1f} м' if now else ''}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -205,6 +208,41 @@ def nearest(seen, center):
         return None
     mid = min(seen, key=lambda i: math.hypot(seen[i][0] - center[0], seen[i][1] - center[1]))
     return mid, seen[mid]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  ВЫСОТА — тоже по метке
+# ═══════════════════════════════════════════════════════════════════════
+#
+# `navigate(frame_id="body", z=0)` держит не высоту, а «сколько было в момент
+# команды»: цель считается от текущего положения. При разгоне дрон наклоняется и
+# слегка всплывает, следующая команда принимает эту высоту за норму — и ошибка
+# копится только вверх, тем быстрее, чем чаще команды (то есть как раз когда метки
+# видны и идёт наведение).
+#
+# Лечится тем же, чем и всё остальное здесь, — меткой: её сторона в пикселях
+# обратно пропорциональна высоте. Запоминаем сторону на рабочей высоте сразу после
+# взлёта и дальше каждой командой возвращаемся к ней. Телеметрия не нужна.
+
+SIDE_REF = 0.0      # сторона метки на рабочей высоте, пиксели (замер после взлёта)
+
+
+def alt_by_side(side):
+    """Оценка высоты по стороне метки в кадре, м. 0.0 — эталон ещё не замерен."""
+    if SIDE_REF <= 1.0 or side <= 1.0:
+        return 0.0
+    return ALT * SIDE_REF / side
+
+
+def hold_alt(side):
+    """На сколько подняться (+) или опуститься (−), чтобы вернуться на рабочую высоту."""
+    now = alt_by_side(side)
+    if not now:
+        return 0.0
+    correction = ALT - now
+    if abs(correction) < 0.05:          # мёртвая зона: не дёргаем дрон по мелочи
+        return 0.0
+    return max(-ALT_FIX, min(ALT_FIX, correction))
 
 
 def place(base, x, y):
@@ -265,12 +303,12 @@ def search_route(start_id):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def fly(drone, forward, left):
-    """Смещение по корпусу: x вперёд, y влево. Команда и пауза на перелёт — как в примере."""
+def fly(drone, forward, left, up=0.0):
+    """Смещение по корпусу: x вперёд, y влево, z вверх. Команда и пауза — как в примере."""
     distance = math.hypot(forward, left)
-    if distance < 0.05:
+    if distance < 0.05 and abs(up) < 0.05:
         return
-    drone.control.navigate(x=float(forward), y=float(left), z=0.0, yaw=YAW,
+    drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
                            speed=SPEED, frame_id="body", auto_arm=False)
     time.sleep(distance / SPEED + 0.5)
 
@@ -304,9 +342,10 @@ def approach(drone, colour):
         where = place(base, x, y)
 
         if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
+            fly(drone, 0.0, 0.0, hold_alt(base[1][2]))   # над яблоком — вернуть высоту
             return where
         scale = MARKER_M / base[1][2]
-        fly(drone, -(y - cy) * scale, -(x - cx) * scale)
+        fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(base[1][2]))
     return where
 
 
@@ -347,27 +386,28 @@ def goto(drone, target, found):
             continue
 
         seen = markers(img)
-        report(target, seen, apples(img))
+        height, width = img.shape[:2]
+        cx, cy = width / 2.0, height / 2.0
+        base = nearest(seen, (cx, cy))
+        report(target, seen, apples(img), base[1][2] if base else 0.0)
         if watch(drone, img, found):
             # Дрон сошёл с узла ради яблока — следующий заход доведёт его до цели.
             continue
-
-        height, width = img.shape[:2]
-        cx, cy = width / 2.0, height / 2.0
 
         if target in seen:
             x, y, side = seen[target]
             if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
                 print(f"          над меткой {target}", flush=True)
+                # Встали над меткой — заодно вернём высоту, если её увело.
+                fly(drone, 0.0, 0.0, hold_alt(side))
                 return True
             # Пиксели в метры — по стороне самой метки. Камера смотрит вниз:
             # верх кадра — это «вперёд», левый край — «влево».
             scale = MARKER_M / side
-            fly(drone, -(y - cy) * scale, -(x - cx) * scale)
+            fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(side))
             continue
 
         # Цели в кадре нет — идём к ней по карте от той метки, что видно.
-        base = nearest(seen, (cx, cy))
         if base is None:
             time.sleep(0.5)
             continue
@@ -379,14 +419,20 @@ def goto(drone, target, found):
         # добавляем то, насколько сама опорная метка сдвинута от центра кадра.
         fly(drone,
             drow * STEP_M - (y - cy) * scale,
-            -dcol * STEP_M - (x - cx) * scale)
+            -dcol * STEP_M - (x - cx) * scale,
+            hold_alt(side))
 
     print(f"          узел {target} пропущен", flush=True)
     return False
 
 
 def scan(drone):
-    """Стартовый угол со взлёта: какая метка под дроном и какую фигуру она назначает."""
+    """Стартовый угол со взлёта: какая метка под дроном и какую фигуру она назначает.
+
+    Здесь же замеряется эталон высоты: сторона метки в кадре сразу после взлёта —
+    это «как выглядит поле с рабочей высоты ALT».
+    """
+    global SIDE_REF
     for _ in range(TRIES):
         img = look(drone)
         if img is None:
@@ -397,10 +443,13 @@ def scan(drone):
             print("меток не видно, ищем…", flush=True)
             time.sleep(0.5)
             continue
-        under = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))[0]
+        under_sight = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))
+        under = under_sight[0]
+        SIDE_REF = under_sight[1][2]
         fruit = ", ".join(name for name, _, _ in apples(img))
         print("=" * 54, flush=True)
         print(f">>> СТАРТОВЫЙ МАРКЕР: {under}  (узел {node(under)})", flush=True)
+        print(f">>> ВЫСОТА {ALT} м = метка {SIDE_REF:.0f} px в кадре (эталон)", flush=True)
         if under in FIGURES:
             print(f">>> НАЗНАЧЕННАЯ ФИГУРА: {FIGURES[under]}", flush=True)
         else:
