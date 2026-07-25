@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2  # noqa: E402
 
-from snake_mission import field, markers  # noqa: E402
+from snake_mission import camera_compat, field, markers  # noqa: E402
 from snake_mission.config import load_config  # noqa: E402
 
 
@@ -102,6 +102,7 @@ def main() -> int:
         return 1
 
     drone = sverk_interfaces.init(Nodename="marker_check")
+    camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
     deadline = time.time() + args.duration
     seen = 0
     try:

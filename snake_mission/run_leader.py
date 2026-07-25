@@ -79,6 +79,8 @@ def main() -> int:
         return 1
 
     drone = sverk_interfaces.init(Nodename="snake_leader")
+    from snake_mission import camera_compat
+    camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
     mission = LeaderMission(
         drone,
         config=config,

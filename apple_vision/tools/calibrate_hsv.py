@@ -43,6 +43,8 @@ def grab_frame(path: str, timeout: float = 5.0) -> int:
         print("sverk_interfaces не найден — команда --grab работает только на дроне")
         return 1
     drone = sverk_interfaces.init(Nodename="hsv_grab")
+    from apple_vision import camera_compat
+    camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
     try:
         frame = drone.image.take_picture(timeout=timeout)
         if frame is None:
@@ -178,6 +180,8 @@ def main() -> int:
             print("sverk_interfaces не найден — используйте --image")
             return 1
         drone = sverk_interfaces.init(Nodename="hsv_calib")
+        from apple_vision import camera_compat
+        camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
         image = drone.image.take_picture(timeout=5.0)
         drone.close()
         if image is None:

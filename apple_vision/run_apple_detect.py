@@ -76,6 +76,8 @@ def main() -> int:
     colors = tuple(c.strip() for c in args.colors.split(",") if c.strip())
 
     drone = sverk_interfaces.init(Nodename="apple_vision")
+    from apple_vision import camera_compat
+    camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
     vision = AppleVision(
         drone,
         on_apple=on_apple,
