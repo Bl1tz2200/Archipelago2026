@@ -31,13 +31,7 @@ import sverk_interfaces
 # Маршрут: ID меток в порядке облёта. Змейка по всему полю 7×7 — правьте под задачу,
 # для первых проверок оставьте 2-3 соседних ID.
 ROUTE = [
-    0,  1,  2,  3,  4,  5,  6,
-    13, 12, 11, 10,  9,  8,  7,
-    14, 15, 16, 17, 18, 19, 20,
-    27, 26, 25, 24, 23, 22, 21,
-    28, 29, 30, 31, 32, 33, 34,
-    41, 40, 39, 38, 37, 36, 35,
-    42, 43, 44, 45, 46, 47, 48,
+    0,  7,  14,  15, 16,  23, 24, 25
 ]
 
 ALT = 1.5           # высота полёта, м (потолок по задаче — 2.0)
@@ -189,14 +183,28 @@ def nearest(seen, center):
 #  ПОЛЁТ
 # ═══════════════════════════════════════════════════════════════════════
 
+absX = 0.0
+absY = 0.0
+
 
 def fly(drone, forward, left):
     """Смещение по корпусу: x вперёд, y влево. Команда и пауза на перелёт — как в примере."""
     distance = math.hypot(forward, left)
     if distance < 0.05:
         return
+
+
+    
     drone.control.navigate(x=float(forward), y=float(left), z=0.0, yaw=YAW,
                            speed=SPEED, frame_id="body", auto_arm=False)
+
+    time.sleep(0.5)
+    absX+= float(forward)
+    absY+= float(left)
+
+    drone.control.navigate(x=absX, y=absY, z=ALT, yaw=YAW, speed=1,
+                                   frame_id="map", auto_arm=True)
+    
     time.sleep(distance / SPEED + 0.5)
 
 
@@ -272,9 +280,25 @@ def main():
     patch_yuv(drone)
     try:
         print(f"ВЗЛЁТ на {ALT} м", flush=True)
-        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=SPEED,
-                               frame_id="body", auto_arm=True)
-        time.sleep(10.0)
+
+        drone.control.navigate(x=0.0, y=0.0, z=ALT/8, yaw=YAW, speed=1,
+                               frame_id="map", auto_arm=True)
+
+        time.sleep(0.2)
+
+        drone.control.navigate(x=0.0, y=0.0, z=ALT/4, yaw=YAW, speed=1,
+                               frame_id="map", auto_arm=True)
+
+        time.sleep(0.2)
+
+        drone.control.navigate(x=0.0, y=0.0, z=ALT/2, yaw=YAW, speed=1,
+                               frame_id="map", auto_arm=True)
+
+        time.sleep(0.2)
+
+        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=1,
+                               frame_id="map", auto_arm=True)
+        time.sleep(5.0)
 
         scan(drone)
         for target in ROUTE:
