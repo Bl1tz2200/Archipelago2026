@@ -35,7 +35,7 @@ from apple_vision import AppleDetector, load_config, save_config  # noqa: E402
 from apple_vision.config import ColorProfile  # noqa: E402
 
 
-def grab_frame(path: str, timeout: float = 5.0) -> int:
+def grab_frame(path: str, cfg, timeout: float = 5.0) -> int:
     """Снимок с камеры дрона в файл."""
     try:
         import sverk_interfaces
@@ -45,6 +45,8 @@ def grab_frame(path: str, timeout: float = 5.0) -> int:
     drone = sverk_interfaces.init(Nodename="hsv_grab")
     from apple_vision import camera_compat
     camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
+    camera_compat.set_white_balance(cfg.camera.video_device, auto=cfg.camera.wb_auto,
+                                     temperature=cfg.camera.wb_temperature)
     try:
         frame = drone.image.take_picture(timeout=timeout)
         if frame is None:
@@ -170,8 +172,10 @@ def main() -> int:
     p.add_argument("--percentile", type=float, default=5.0, help="отсекаемые хвосты распределения, %%")
     args = p.parse_args()
 
+    cfg = load_config(args.config) if args.config else load_config()
+
     if args.grab:
-        return grab_frame(args.grab)
+        return grab_frame(args.grab, cfg)
 
     if args.live:
         try:
@@ -182,6 +186,8 @@ def main() -> int:
         drone = sverk_interfaces.init(Nodename="hsv_calib")
         from apple_vision import camera_compat
         camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
+        camera_compat.set_white_balance(cfg.camera.video_device, auto=cfg.camera.wb_auto,
+                                         temperature=cfg.camera.wb_temperature)
         image = drone.image.take_picture(timeout=5.0)
         drone.close()
         if image is None:
@@ -232,7 +238,6 @@ def main() -> int:
         print("Для --save укажите --color")
         return 1
 
-    cfg = load_config(args.config) if args.config else load_config()
     try:
         profile = cfg.profile(args.color)
         profile.ranges = ranges

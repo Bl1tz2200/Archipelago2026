@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import cv2
 import numpy as np
 
@@ -67,3 +69,46 @@ def patch_image_api(drone):
     image.to_cv2 = to_cv2
     image._yuv_patched = True
     return drone
+
+
+# Название ручки авто-баланса белого разнится между версиями UVC-драйвера.
+_WB_AUTO_CTRL_NAMES = ("white_balance_automatic", "white_balance_temperature_auto")
+
+
+def set_white_balance(device: str, auto: bool = True, temperature: int = None) -> bool:
+    """Настроить баланс белого камеры через v4l2-ctl (`/usb_cam` — обычная V4L2/UVC-камера).
+
+    Пороги HSV в `config/apples.yaml` калибруются под конкретный баланс белого — если он
+    "плавает" в auto-режиме между калибровкой и полётом, цвет яблока на кадре смещается и
+    пороги перестают совпадать. Поэтому имеет смысл фиксировать баланс белого (auto=False,
+    temperature=<K>) на время калибровки и полёта, а не полагаться на авто-режим камеры.
+
+    Best-effort: если `v4l2-ctl` не установлен или устройство/ручка недоступны — печатает
+    предупреждение и возвращает False, не бросает исключение (настройка камеры не должна
+    ронять калибровку или миссию).
+    """
+    for name in _WB_AUTO_CTRL_NAMES:
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "-d", device, "--set-ctrl", f"{name}={1 if auto else 0}"],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            print(f"Баланс белого не настроен: {exc}")
+            return False
+        if result.returncode == 0:
+            break
+    else:
+        print(f"Баланс белого: на {device} не нашлась ручка авто-режима. "
+              f"Смотрите доступные: v4l2-ctl -d {device} --list-ctrls")
+        return False
+
+    if not auto and temperature is not None:
+        result = subprocess.run(
+            ["v4l2-ctl", "-d", device, "--set-ctrl", f"white_balance_temperature={int(temperature)}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            print(f"Баланс белого: не удалось задать температуру на {device}: {result.stderr.strip()}")
+            return False
+    return True

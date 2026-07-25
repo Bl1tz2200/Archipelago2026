@@ -102,6 +102,9 @@ class CameraConfig:
     fallback_hfov_deg: float = 65.0  # угол обзора, если файла калибровки нет
     yaw_offset_deg: float = 0.0      # поворот камеры относительно носа дрона
     mirror_x: bool = False           # true, если картинка зеркальна по горизонтали
+    video_device: str = "/dev/video0"  # устройство камеры для настройки баланса белого
+    wb_auto: bool = False              # true = авто-баланс камеры; false = фиксированный (wb_temperature)
+    wb_temperature: int = 4600         # цветовая температура, K (используется при wb_auto: false)
 
 
 @dataclass
@@ -210,6 +213,9 @@ _CAMERA_COMMENTS = {
     "fallback_hfov_deg": "горизонтальный угол обзора камеры, градусы",
     "yaw_offset_deg": "поворот камеры относительно носа дрона: 0 / 90 / 180 / 270",
     "mirror_x": "true, если картинка зеркальна по горизонтали",
+    "video_device": "устройство камеры (v4l2-ctl --list-devices), для баланса белого",
+    "wb_auto": "true = авто-баланс белого; false = фиксированный, из wb_temperature",
+    "wb_temperature": "цветовая температура, K (даёт смысл только при wb_auto: false)",
 }
 
 

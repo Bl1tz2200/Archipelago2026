@@ -67,11 +67,13 @@ def main() -> int:
         print("Проверить детектор без дрона: python3 tools/webcam_demo.py")
         return 1
 
+    config = load_config(args.config) if args.config else load_config()
+
     drone = sverk_interfaces.init(Nodename="apple_vision_live_view")
     from apple_vision import camera_compat
     camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
-
-    config = load_config(args.config) if args.config else load_config()
+    camera_compat.set_white_balance(config.camera.video_device, auto=config.camera.wb_auto,
+                                     temperature=config.camera.wb_temperature)
     colors = tuple(c.strip() for c in args.colors.split(",") if c.strip())
     detector = None if args.raw else AppleDetector(config, colors)
 
