@@ -18,11 +18,13 @@
 
 Два способа лететь:
 
-  --nav blind     (по умолчанию) счисление пути: перелёт = смещение по корпусу на
-                  `--step` метров. Камера не нужна вообще. Работает на любой высоте,
-                  но накапливает снос — для первого «просто пролететь» это нормально.
-  --nav markers   наведение по ArUco-меткам через `MarkerNavigator` — точно, но нужна
-                  видимость меток; на 0.5 м в кадр попадает мало меток.
+  --nav markers   (по умолчанию) наведение по ArUco-меткам через `MarkerNavigator`:
+                  цель перелёта — метка, признак прилёта — метка у центра кадра.
+                  Нужна видимость меток: на 0.5 м в кадр попадает мало меток, ставьте
+                  высоту от 1.5 м и проверяйте видимость `tools/marker_check.py`.
+  --nav blind     АВАРИЙНЫЙ: счисление пути, перелёт = смещение по корпусу на `--step`
+                  метров. Камера не нужна, но снос накапливается и корректировать его
+                  нечем. Только когда меток не видно вовсе.
 """
 
 from __future__ import annotations
@@ -335,11 +337,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--speed", type=float, default=0.0, help="скорость перелёта, м/с")
     p.add_argument("--start", type=int, default=0, help="ID стартовой метки")
     p.add_argument("--step", type=float, default=1.0,
-                   help="шаг сетки меток на площадке, м (для --nav blind)")
+                   help="шаг сетки меток на площадке, м (только для --nav blind)")
     p.add_argument("--span", type=int, default=1,
                    help="сколько рядов меток «видно» при планировании: 1 = обойти все узлы")
-    p.add_argument("--nav", default="blind", choices=["blind", "markers"],
-                   help="blind — счисление пути, markers — наведение по ArUco")
+    p.add_argument("--nav", default="markers", choices=["markers", "blind"],
+                   help="markers — наведение по ArUco (штатно), blind — счисление (аварийно)")
     p.add_argument("--strategy", default="",
                    choices=["", "body_step", "auto", "aruco_frame", "visual"],
                    help="как лететь к метке при --nav markers: body_step (navigate по "
@@ -383,8 +385,8 @@ def main() -> int:
     numbering = config.markers.numbering()
     print(f"Старт: метка {args.start} → узел {start}")
     nav_note = (f"навигация по меткам ArUco (стратегия {config.navigation.strategy})"
-                if args.nav == "markers" else
-                f"навигация вслепую, счислением (шаг сетки {args.step:.2f} м, метки не участвуют)")
+                if args.nav == "markers" and config.navigation.strategy != "body_step" else
+                f"АВАРИЙНО: навигация счислением (шаг сетки {args.step:.2f} м, метки не участвуют)")
     print(f"Маршрут: {len(route) - 1} перелётов, "
           f"высота {config.flight.altitude:.2f} м, скорость {config.flight.speed:.2f} м/с")
     print(nav_note)

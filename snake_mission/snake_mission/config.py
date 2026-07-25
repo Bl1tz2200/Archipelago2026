@@ -24,11 +24,12 @@ ALTITUDE_CEILING_M = 3.0
 # Регламент, п. 2.1.3: на сборку формации не более 3 минут с момента взлёта лидера.
 FORMATION_BUDGET_S = 180.0
 
-# Способы перелёта между узлами. `body_step` — штатный: одна команда
-# `navigate(frame_id="body")` на шаг сетки и пауза на перелёт, ровно как в базовом
-# примере полёта из документации. Остальные — наведение по камере/tf2, они держат
-# дрон в непрерывном цикле управления и включаются только вручную.
-STRATEGIES = ("body_step", "auto", "aruco_frame", "visual")
+# Способы перелёта между узлами. Летаем по меткам: цель перелёта — метка, а не
+# координата и не расстояние. `visual` — штатный (наведение по кадру), `aruco_frame` —
+# через tf2-фрейм метки, `auto` — выбор между ними по доступности фреймов.
+# `body_step` — аварийный: счисление на `step_m` метров, метки в управлении не
+# участвуют; включать, только если меток не видно вовсе.
+STRATEGIES = ("visual", "auto", "aruco_frame", "body_step")
 
 
 @dataclass
@@ -66,9 +67,9 @@ class MarkersConfig:
 
 @dataclass
 class NavigationConfig:
-    strategy: str = "body_step"        # body_step | auto | aruco_frame | visual
-    step_m: float = 1.0                # шаг сетки меток на площадке, м (для body_step)
-    settle_pause: float = 1.0          # запас на торможение после перелёта, с
+    strategy: str = "visual"           # visual | auto | aruco_frame | body_step (аварийный)
+    step_m: float = 1.0                # шаг сетки меток на площадке, м (только body_step)
+    settle_pause: float = 1.0          # запас на торможение после перелёта, с (только body_step)
     time_scale: float = 1.0            # во сколько раз сжаты паузы перелёта; >1 — только симулятор
     arrive_tolerance: float = 0.10     # попадание в узел: доля диагонали кадра
     center_tolerance: float = 0.06     # стабилизация: доля диагонали кадра
