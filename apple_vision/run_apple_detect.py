@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--colors", default="", help="ограничить цвета, например red,green")
     p.add_argument("--duration", type=float, default=180.0, help="сколько секунд искать (0 = без ограничения)")
     p.add_argument("--no-publish", action="store_true", help="не публиковать разметку в /out_detection")
+    p.add_argument("--no-telemetry", action="store_true",
+                    help="не звать get_telemetry (для стенда без FCU — она виснет без телеметрии); "
+                         "детекция по цвету работает, мировые координаты яблок не пишутся")
     p.add_argument("--quiet", action="store_true", help="без подробного вывода")
     p.add_argument("--fly", action="store_true", help="взлететь и облетать зону змейкой во время поиска")
     p.add_argument("--alt", type=float, default=1.5, help="высота полёта, м")
@@ -78,6 +81,8 @@ def main() -> int:
     drone = sverk_interfaces.init(Nodename="apple_vision")
     from apple_vision import camera_compat
     camera_compat.patch_image_api(drone)  # камера отдаёт YUV — учим to_cv2 его понимать
+    camera_compat.set_white_balance(config.camera.video_device, auto=config.camera.wb_auto,
+                                     temperature=config.camera.wb_temperature)
     vision = AppleVision(
         drone,
         on_apple=on_apple,
@@ -85,6 +90,7 @@ def main() -> int:
         colors=colors,
         publish=not args.no_publish,
         verbose=not args.quiet,
+        use_telemetry=not args.no_telemetry,
     )
 
     print(f"Ищем яблоки: {', '.join(p.label for p in vision.detector.profiles)}")

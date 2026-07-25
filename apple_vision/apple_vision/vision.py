@@ -53,6 +53,7 @@ class AppleVision:
         colors: Sequence[str] = (),
         publish: bool = True,
         verbose: bool = True,
+        use_telemetry: bool = True,
     ) -> None:
         if config is None or isinstance(config, str):
             config = load_config(config) if config else load_config()
@@ -61,6 +62,10 @@ class AppleVision:
         self.on_apple = on_apple
         self.publish = publish and drone is not None
         self.verbose = verbose
+        # get_telemetry() виснет вечно, если FCU не публикует телеметрию (стенд без
+        # него) — обычный timeout/SIGTERM это не берёт. При use_telemetry=False
+        # регистрация идёт по цвету, без проекции в мировые координаты.
+        self.use_telemetry = use_telemetry and drone is not None
 
         self.detector = AppleDetector(config, colors)
         self.registry = AppleRegistry(config.registry)
@@ -81,7 +86,7 @@ class AppleVision:
 
     def _telemetry(self) -> Tuple[Optional[Tuple[float, float]], float, Optional[float]]:
         """Позиция в map, курс и высота. При недоступной телеметрии — (None, 0, None)."""
-        if self.drone is None:
+        if not self.use_telemetry:
             return None, 0.0, None
         try:
             t = self.drone.control.get_telemetry(frame_id="map")

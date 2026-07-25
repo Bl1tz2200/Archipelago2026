@@ -48,15 +48,16 @@ case "$cmd" in
         source_ros
         ms="${MARKER_SECONDS:-20}"
         as="${APPLE_SECONDS:-30}"
-        # Жёсткий таймер на каждый под-шаг: если телеметрия FCU не идёт,
-        # get_telemetry() виснет вечно и не реагирует на обычный сигнал — только SIGKILL.
-        # Так наземная проверка всегда доходит до конца, а не залипает на одном шаге.
+        # Жёсткий таймер на шаг с метками — на случай, если камера не отдаёт кадры.
+        # Шаг с яблоками идёт с --no-telemetry: наземная проверка выполняется
+        # с пропеллерами, без взлёта, поэтому телеметрия FCU для неё не нужна, а
+        # get_telemetry() без неё виснет вечно и не реагирует на обычный сигнал.
         echo "########## 1/3 · ПОЛЕ МЕТОК ##########"
         timeout -s KILL "$((ms + 15))" python3 snake_mission/tools/marker_check.py --duration "$ms"
         [ $? -eq 137 ] && echo "(проверка меток зависла и снята по таймеру — проверьте камеру: ros2 topic hz /camera_1/image_raw)"
         echo "########## 2/3 · РАСПОЗНАВАНИЕ «ЯБЛОК» ##########"
-        timeout -s KILL "$((as + 15))" python3 apple_vision/run_apple_detect.py --duration "$as"
-        [ $? -eq 137 ] && echo "(распознавание зависло и снято по таймеру — нужна телеметрия FCU: ros2 topic hz /fmu/out/vehicle_status)"
+        timeout -s KILL "$((as + 15))" python3 apple_vision/run_apple_detect.py --duration "$as" --no-telemetry
+        [ $? -eq 137 ] && echo "(распознавание зависло и снято по таймеру — проверьте камеру: ros2 topic hz /camera_1/image_raw)"
         echo "########## 3/3 · РАСЧЁТ МАРШРУТА (без полёта) ##########"
         python3 snake_mission/run_leader.py --dry-run --start "${START:-42}"
         echo "########## наземная проверка завершена ##########"
