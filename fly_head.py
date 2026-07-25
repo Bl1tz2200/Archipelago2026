@@ -5,6 +5,10 @@
 облёт поля → распознавание трёх «яблок» с зависанием над каждым → возврат на
 стартовую метку → посадка.
 
+Яблоки различаются по МЕСТУ на поле, а не по цвету: на зачёте несколько яблок
+могут оказаться одного цвета. Место считается от видимой метки в узлах сетки, и
+два пятна ближе MERGE_STEPS друг к другу считаются одним яблоком.
+
 Хвостовых дронов здесь нет: там, где по п. 2.1.2 регламента с земли взлетает
 следующий дрон, лидер просто зависает HOVER_S секунд и печатает событие.
 Выполнение назначенной фигуры (п. 2.1.3) в этот файл не входит.
@@ -56,16 +60,18 @@ SEARCH_ROW_STEP = 2     # облёт через строку: на все 49 у�
 SEARCH_LIMIT_S = 180.0  # п. 2.1.3: на сборку формации — не более 3 минут от взлёта лидера
 APPLES_TOTAL = 3        # п. 2.1.2: на полигоне три «яблока»
 HOVER_S = 2.0           # зависание над яблоком — время взлёта хвостового дрона
+MERGE_STEPS = 0.6       # два пятна ближе этой доли шага сетки — одно и то же яблоко
 
 # Цвета «яблок» в HSV: H 0..179, S 0..255, V 0..255.
 # Замерено по снимкам с полёта: яблоко на кадре ТЁМНОЕ (V 26..75) и очень насыщенное
 # (S 226..255), а пол и жёлтая полоса на нём — S не выше 100. Поэтому яблоко от фона
-# отделяет насыщенность, а не яркость: по яркости они почти не отличаются.
+# отделяет насыщенность, а не яркость: по яркости они почти не отличаются, и верхнего
+# предела по V нет вовсе — он ничего не отсекал, зато мешал бы при ярком свете.
 # У красного два диапазона — его оттенок лежит по обе стороны нуля.
 APPLES = {
-    "красное": [((0, 130, 12), (9, 255, 200)), ((168, 130, 12), (179, 255, 200))],
-    "жёлтое": [((10, 130, 12), (27, 255, 200))],
-    "зелёное": [((28, 130, 12), (46, 255, 200))],
+    "красное": [((0, 130, 12), (9, 255, 255)), ((168, 130, 12), (179, 255, 255))],
+    "жёлтое": [((10, 130, 12), (27, 255, 255))],
+    "зелёное": [((28, 130, 12), (46, 255, 255))],
 }
 APPLE_MIN_PERCENT = 0.04   # с рабочей высоты яблоко занимает 0.06..0.20% кадра
 APPLE_MIN_ROUND = 0.55     # круглость: 1.00 — идеальный круг (у яблок выходит 0.75..0.91)
@@ -201,6 +207,36 @@ def nearest(seen, center):
     return mid, seen[mid]
 
 
+def place(base, x, y):
+    """Где точка кадра лежит на поле: (столбец, строка) в узлах сетки, дробные.
+
+    Отсчёт от видимой метки: сторона метки задаёт масштаб, её ID — узел. Столбцы
+    растут вправо по кадру, строки — вверх, ровно как в перелётах (см. `goto`).
+    """
+    base_id, (bx, by, side) = base
+    scale = MARKER_M / side / STEP_M          # пиксель → доля шага сетки
+    col, row = node(base_id)
+    return col + (x - bx) * scale, row - (y - by) * scale
+
+
+def at(spot):
+    """Место на поле для печати: «у метки 23» (ближайший узел, не вылезая за поле)."""
+    col = min(max(int(round(spot[0])), 0), GRID - 1)
+    row = min(max(int(round(spot[1])), 0), GRID - 1)
+    return f"у метки {mark(col, row)}"
+
+
+def counted(found, colour, spot):
+    """Это яблоко уже засчитано?
+
+    Опознаём по МЕСТУ на поле, а не по цвету: на зачёте несколько яблок могут быть
+    одного цвета, и зачёт по цвету склеил бы их в одно. Цвет при этом всё равно
+    учитывается — два разных цвета рядом это заведомо два разных яблока.
+    """
+    return any(c == colour and math.hypot(col - spot[0], row - spot[1]) < MERGE_STEPS
+               for c, col, row in found)
+
+
 def search_route(start_id):
     """Маршрут поиска яблок: змейка по полю от стартового угла.
 
@@ -240,7 +276,13 @@ def fly(drone, forward, left):
 
 
 def approach(drone, colour):
-    """Подвестись над яблоком нужного цвета: True — встали над ним."""
+    """Подвестись над яблоком нужного цвета.
+
+    Возвращает место яблока на поле — (столбец, строка) в узлах — или None, если
+    яблоко или метки пропали из кадра. Место считается по последнему кадру, когда
+    дрон уже над яблоком: так оно точнее всего.
+    """
+    where = None
     for _ in range(TRIES):
         img = look(drone)
         if img is None:
@@ -249,35 +291,47 @@ def approach(drone, colour):
 
         spot = next((s for s in apples(img) if s[0] == colour), None)
         if spot is None:
-            return False
+            return where
 
         height, width = img.shape[:2]
         cx, cy = width / 2.0, height / 2.0
         _, x, y = spot
-        if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
-            return True
 
         # Масштаб кадра — по стороне видимой метки; без метки метров не посчитать.
         base = nearest(markers(img), (cx, cy))
         if base is None:
-            return False
+            return where
+        where = place(base, x, y)
+
+        if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
+            return where
         scale = MARKER_M / base[1][2]
         fly(drone, -(y - cy) * scale, -(x - cx) * scale)
-    return False
+    return where
 
 
 def watch(drone, img, found):
     """Новое яблоко в кадре → подлететь, зависнуть, засчитать. True — засчитали.
 
-    Каждое яблоко засчитывается однократно (п. 2.1.2), опознаётся по цвету —
-    «яблоки визуально различимы между собой цветом», других похожих объектов нет.
+    Каждое яблоко засчитывается однократно (п. 2.1.2). Опознаётся по месту на поле:
+    цвета на зачёте могут повторяться, поэтому «уже видели такой цвет» — не признак
+    того же самого яблока.
     """
-    for colour, _, _ in apples(img):
-        if colour in found:
+    base = nearest(markers(img), (img.shape[1] / 2.0, img.shape[0] / 2.0))
+    if base is None:
+        return False        # без метки места не посчитать — разберёмся на следующем кадре
+
+    for colour, x, y in apples(img):
+        if counted(found, colour, place(base, x, y)):
             continue
-        approach(drone, colour)
-        found.append(colour)
-        print(f">>> ЯБЛОКО {len(found)}/{APPLES_TOTAL}: {colour} — "
+
+        # Место с края кадра прикидочное, поэтому подлетаем и уточняем его над яблоком.
+        where = approach(drone, colour)
+        if where is None or counted(found, colour, where):
+            continue
+
+        found.append((colour, where[0], where[1]))
+        print(f">>> ЯБЛОКО {len(found)}/{APPLES_TOTAL}: {colour} {at(where)} — "
               f"зависаем {HOVER_S} с (здесь взлетает дрон {len(found) + 1})", flush=True)
         time.sleep(HOVER_S)
         return True
@@ -385,9 +439,10 @@ def main():
                     break
                 goto(drone, target, found)
 
+            listing = ", ".join(f"{c} {at((col, row))}" for c, col, row in found)
             print("=" * 54, flush=True)
             print(f">>> НАЙДЕНО ЯБЛОК: {len(found)}/{APPLES_TOTAL} "
-                  f"({', '.join(found) or 'ни одного'})", flush=True)
+                  f"({listing or 'ни одного'})", flush=True)
             print("=" * 54, flush=True)
             print(f"ВОЗВРАТ на стартовую метку {start}", flush=True)
             goto(drone, start, found)
