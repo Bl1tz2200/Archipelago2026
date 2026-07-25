@@ -36,7 +36,17 @@ ROUTE = [
 
 ALT = 1.5           # высота полёта, м (потолок по задаче — 2.0)
 SPEED = 0.5         # скорость перелёта, м/с
+CLIMB_SPEED = 0.3   # скорость набора высоты — медленнее горизонтальной, взлёт мягче
 YAW = 0.0           # курс держим постоянным весь полёт, рад
+
+# Взлёт: пока дрон качает после набора высоты, командовать ему нельзя — наведение
+# по прыгающей в кадре метке только раскачивает сильнее. Поэтому сначала ждём,
+# пока картинка не устоится, и только потом трогаемся с места.
+SETTLE_S = 3.0      # запас на успокоение сверх времени набора высоты, с
+SETTLE_FRAMES = 3   # столько кадров подряд метка должна стоять на месте
+SETTLE_DRIFT = 0.15 # «стоит на месте»: сдвиг между кадрами меньше этой доли метки
+SETTLE_TRIES = 20   # предел ожидания успокоения (кадров), дальше летим как есть
+GAIN = 0.7          # какую долю рассчитанной поправки отрабатывать за раз
 
 GRID = 7            # поле 7×7, ID = строка*7 + столбец
 FLIP_X = True       # столбцы пронумерованы справа налево (проверено на поле: метка 0 справа)
@@ -232,6 +242,47 @@ def fly(drone, forward, left, up=0.0):
     time.sleep(distance / SPEED + 0.5)
 
 
+def settle(drone):
+    """Дождаться спокойного висения. Возвращает сторону метки на спокойном кадре.
+
+    Признак того, что дрон перестал качать, — метка под ним стоит в кадре: между
+    соседними кадрами её центр и размер почти не меняются. Пока этого нет, команд
+    не отправляем вовсе: доводка по прыгающей метке раскачивает дрон ещё сильнее.
+    """
+    previous = None
+    calm = 0
+    side = 0.0
+    for _ in range(SETTLE_TRIES):
+        img = look(drone)
+        if img is None:
+            time.sleep(0.3)
+            continue
+
+        base = nearest(markers(img), (img.shape[1] / 2.0, img.shape[0] / 2.0))
+        if base is None:
+            previous, calm = None, 0
+            time.sleep(0.3)
+            continue
+
+        mid, (x, y, side) = base
+        if previous is not None and previous[0] == mid:
+            px, py, pside = previous[1]
+            drift = math.hypot(x - px, y - py) / side      # сдвиг в долях метки
+            zoom = abs(side - pside) / side                # и «дыхание» размера
+            if drift < SETTLE_DRIFT and zoom < SETTLE_DRIFT:
+                calm += 1
+                if calm >= SETTLE_FRAMES:
+                    print(f"          висим спокойно (метка {mid}, {side:.0f} px)", flush=True)
+                    return side
+            else:
+                calm = 0
+        previous = (mid, (x, y, side))
+        time.sleep(0.3)
+
+    print("          успокоиться не вышло — летим как есть", flush=True)
+    return side
+
+
 def goto(drone, target):
     """Долететь до метки `target`. True — встали над ней."""
     for _ in range(TRIES):
@@ -255,7 +306,9 @@ def goto(drone, target):
                 return True
             # Пиксели в метры — по стороне самой метки. Камера смотрит вниз:
             # верх кадра — это «вперёд», левый край — «влево».
-            scale = MARKER_M / side
+            # GAIN < 1: отрабатываем не весь промах разом, иначе дрон проскакивает
+            # цель и начинает качаться от команды к команде.
+            scale = MARKER_M / side * GAIN
             fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(side))
             continue
 
@@ -282,9 +335,11 @@ def scan(drone):
     """Сканирование поля со взлёта: какая метка под дроном и что видно вокруг.
 
     Здесь же замеряется эталон высоты: сторона метки в кадре сразу после взлёта —
-    это «как выглядит поле с рабочей высоты ALT».
+    это «как выглядит поле с рабочей высоты ALT». Замер делается по спокойному
+    кадру: снятый на раскачке, он увёл бы высоту на весь оставшийся полёт.
     """
     global SIDE_REF
+    calm_side = settle(drone)
     for _ in range(TRIES):
         img = look(drone)
         if img is None:
@@ -296,7 +351,7 @@ def scan(drone):
             time.sleep(0.5)
             continue
         under = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))
-        SIDE_REF = under[1][2]
+        SIDE_REF = calm_side or under[1][2]
         print("=" * 54, flush=True)
         print(f">>> МЕТКА ПОД ДРОНОМ: {under[0]}  (узел {node(under[0])})", flush=True)
         print(f">>> ВЫСОТА {ALT} м = метка {SIDE_REF:.0f} px в кадре (эталон)", flush=True)
@@ -313,11 +368,11 @@ def main():
     patch_yuv(drone)
     try:
         print(f"ВЗЛЁТ на {ALT} м", flush=True)
-
-        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=SPEED,
+        # Набор высоты на своей, пониженной скорости: чем мягче взлёт, тем меньше
+        # раскачка наверху. Пауза — время самого набора плюс запас на успокоение.
+        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=CLIMB_SPEED,
                                frame_id="body", auto_arm=True)
-
-        time.sleep(5.0)
+        time.sleep(ALT / CLIMB_SPEED + SETTLE_S)
 
         scan(drone)
         for target in ROUTE:
