@@ -120,12 +120,20 @@ def patch_yuv(drone):
 
 
 def look(drone):
-    """Один кадр с камеры (BGR) или None."""
+    """Один кадр с камеры (BGR) или None.
+
+    None — и когда камера не отдала кадр, и когда отдала негодный: разбирать такой
+    нельзя (cvtColor на пустом или одноканальном кадре бросает исключение), а вся
+    программа ниже уже умеет ждать следующего кадра.
+    """
     try:
-        return drone.image.take_picture(timeout=2.0)
+        img = drone.image.take_picture(timeout=2.0)
     except Exception as exc:
         print(f"кадр не получен: {exc}", flush=True)
         return None
+    if img is None or getattr(img, "ndim", 0) != 3 or img.size == 0:
+        return None
+    return img
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -154,7 +162,9 @@ def markers(img):
         # Сторона метки — среднее четырёх рёбер квадрата. Это и есть масштаб кадра.
         side = float(np.mean([np.linalg.norm(pts[i] - pts[(i + 1) % 4]) for i in range(4)]))
         edge = pts[1] - pts[0]
-        if side > 1.0:
+        # Словарь 4X4_50 содержит и ID вне поля (49): ложное срабатывание на нём
+        # увело бы карту в несуществующую строку. На поле только 0…48.
+        if side > 1.0 and int(mid) < GRID * GRID:
             seen[int(mid)] = (float(x), float(y), side, math.atan2(float(edge[1]), float(edge[0])))
     return seen
 
@@ -220,7 +230,7 @@ def mark(col, row):
 
 
 def nearest(seen, center):
-    """Ближайшая к центру кадра метка — та, над которой висим: (ID, (x, y, сторона))."""
+    """Ближайшая к центру кадра метка — та, над которой висим: (ID, замер) или None."""
     if not seen:
         return None
     mid = min(seen, key=lambda i: math.hypot(seen[i][0] - center[0], seen[i][1] - center[1]))
@@ -313,11 +323,21 @@ def place(base, x, y):
 
     Отсчёт от видимой метки: сторона метки задаёт масштаб, её ID — узел. Столбцы
     растут вправо по кадру, строки — вверх, ровно как в перелётах (см. `goto`).
+
+    Кадр повёрнут вместе с дроном, а узлы сетки — нет, поэтому смещение по кадру
+    разворачивается в оси поля (обратное преобразование к `to_body`). Без этого
+    отвёрнутому дрону одно и то же яблоко кажется лежащим в разных узлах — и
+    засчитывается дважды.
     """
-    base_id, (bx, by, side, _) = base
+    base_id, (bx, by, side, angle) = base
     scale = MARKER_M / side / STEP_M          # пиксель → доля шага сетки
+    forward, left = -(y - by) * scale, -(x - bx) * scale
+    error = turn_error(angle)
+    if abs(error) >= math.radians(3):
+        c, s = math.cos(error), math.sin(error)
+        forward, left = forward * c - left * s, forward * s + left * c
     col, row = node(base_id)
-    return col + (x - bx) * scale, row - (y - by) * scale
+    return col - left, row + forward
 
 
 def at(spot):
@@ -338,17 +358,41 @@ def counted(found, colour, spot):
                for c, col, row in found)
 
 
+def walk(start_id, target_id):
+    """Путь от узла к узлу шагами в соседний узел: список ID без начального.
+
+    П. 2.1.3 разрешает лидеру только перелёты между соседними узлами, включая
+    диагональные (повороты кратно 45°). Поэтому любой перегон через поле —
+    возврат на старт, выход из неугловой стартовой точки — раскладывается на
+    такие шаги: сперва по диагонали, пока расходятся обе координаты, потом прямо.
+    """
+    col, row = node(start_id)
+    tcol, trow = node(target_id)
+    path = []
+    while (col, row) != (tcol, trow):
+        col += (tcol > col) - (tcol < col)
+        row += (trow > row) - (trow < row)
+        path.append(mark(col, row))
+    return path
+
+
 def search_route(start_id):
     """Маршрут поиска яблок: змейка по полю от стартового угла.
 
-    Соседние узлы маршрута — соседние узлы сетки (п. 2.1.3: перелёты только между
-    соседними узлами). Строки берутся через SEARCH_ROW_STEP, а промежуточные —
-    проходятся по одному узлу на развороте, чтобы не было прыжка через клетку.
+    Соседние узлы маршрута — соседние узлы сетки (п. 2.1.3). Строки берутся через
+    SEARCH_ROW_STEP, а промежуточные проходятся по одному узлу на развороте, чтобы
+    не было прыжка через клетку.
+
+    Змейка всегда начинается из угла — так она накрывает поле целиком. Если дрон
+    почему-то стартовал не с угловой метки, путь до ближайшего угла добавляется
+    спереди теми же соседними шагами.
     """
     col0, row0 = node(start_id)
-    cols = list(range(GRID)) if col0 == 0 else list(range(GRID - 1, -1, -1))
-    step = SEARCH_ROW_STEP if row0 == 0 else -SEARCH_ROW_STEP
-    rows = list(range(row0, GRID if row0 == 0 else -1, step))
+    ccol = 0 if col0 * 2 < GRID - 1 else GRID - 1
+    crow = 0 if row0 * 2 < GRID - 1 else GRID - 1
+    cols = list(range(GRID)) if ccol == 0 else list(range(GRID - 1, -1, -1))
+    step = SEARCH_ROW_STEP if crow == 0 else -SEARCH_ROW_STEP
+    rows = list(range(crow, GRID if crow == 0 else -1, step))
 
     route = []
     for i, row in enumerate(rows):
@@ -358,7 +402,9 @@ def search_route(start_id):
             # разворот: спускаемся на следующую полосу по одному узлу
             down = 1 if rows[i + 1] > row else -1
             route += [mark(line[-1], r) for r in range(row + down, rows[i + 1], down)]
-    return route
+    # Маршрут всегда начинается с узла, на котором дрон уже стоит. Путь до угла
+    # заканчивается самим углом, поэтому от змейки берётся хвост без её первого узла.
+    return [start_id] + walk(start_id, route[0]) + route[1:]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -371,9 +417,13 @@ def fly(drone, forward, left, up=0.0):
     distance = math.hypot(forward, left)
     if distance < 0.05 and abs(up) < 0.05:
         return
-    drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
-                           speed=SPEED, frame_id="body", auto_arm=False)
-    time.sleep(distance / SPEED + 0.5)
+    resp = drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
+                                  speed=SPEED, frame_id="body", auto_arm=False)
+    # Отказ navigate виден только здесь: дрон просто не двинется, а наведение будет
+    # раз за разом слать ту же команду. В логе это должно быть видно сразу.
+    if resp is not None and not getattr(resp, "success", True):
+        print(f"          navigate отказал: {getattr(resp, 'message', '')}", flush=True)
+    time.sleep(math.hypot(distance, up) / SPEED + 0.5)
 
 
 def settle(drone):
@@ -454,18 +504,20 @@ def approach(drone, colour):
     return where
 
 
-def watch(drone, img, found):
+def watch(drone, base, fruit, found):
     """Новое яблоко в кадре → подлететь, зависнуть, засчитать. True — засчитали.
+
+    Метки и яблоки кадра приходят уже разобранными: на кадре 1280×950 второй разбор
+    того же кадра стоил бы заметной паузы в наведении.
 
     Каждое яблоко засчитывается однократно (п. 2.1.2). Опознаётся по месту на поле:
     цвета на зачёте могут повторяться, поэтому «уже видели такой цвет» — не признак
     того же самого яблока.
     """
-    base = nearest(markers(img), (img.shape[1] / 2.0, img.shape[0] / 2.0))
     if base is None:
         return False        # без метки места не посчитать — разберёмся на следующем кадре
 
-    for colour, x, y in apples(img):
+    for colour, x, y in fruit:
         if counted(found, colour, place(base, x, y)):
             continue
 
@@ -482,21 +534,28 @@ def watch(drone, img, found):
     return False
 
 
-def goto(drone, target, found):
-    """Долететь до метки `target`, попутно высматривая яблоки. True — встали над ней."""
+def goto(drone, target, found, deadline=None):
+    """Долететь до метки `target`, попутно высматривая яблоки. True — встали над ней.
+
+    `deadline` — момент, после которого узел бросается недоведённым: три минуты на
+    поиск считаются по регламенту, а не по числу оставшихся попыток.
+    """
     blind = 0
     for _ in range(TRIES):
+        if deadline is not None and time.time() > deadline:
+            return False
         img = look(drone)
         if img is None:
             time.sleep(0.5)
             continue
 
         seen = markers(img)
+        fruit = apples(img)
         height, width = img.shape[:2]
         cx, cy = width / 2.0, height / 2.0
         base = nearest(seen, (cx, cy))
-        report(target, seen, apples(img), base[1][2] if base else 0.0)
-        if watch(drone, img, found):
+        report(target, seen, fruit, base[1][2] if base else 0.0)
+        if watch(drone, base, fruit, found):
             # Дрон сошёл с узла ради яблока — следующий заход доведёт его до цели.
             continue
 
@@ -556,6 +615,7 @@ def scan(drone):
     """
     global SIDE_REF, ANGLE_REF, STEP_M
     calm_side = settle(drone)
+    blind = 0
     for _ in range(TRIES):
         img = look(drone)
         if img is None:
@@ -563,14 +623,24 @@ def scan(drone):
             continue
         seen = markers(img)
         if not seen:
-            print("меток не видно, ищем…", flush=True)
-            time.sleep(0.5)
+            # Как и в полёте: не видно ничего — поднимаемся расширить обзор. Без
+            # стартовой метки не будет ни фигуры, ни маршрута, так что пробуем всерьёз.
+            blind += 1
+            if blind >= BLIND_FRAMES:
+                print("меток не видно — поднимаемся осмотреться", flush=True)
+                fly(drone, 0.0, 0.0, LOOK_UP)
+                blind = 0
+            else:
+                print("меток не видно, ищем…", flush=True)
+                time.sleep(0.5)
             continue
         under_sight = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))
         under = under_sight[0]
         SIDE_REF = calm_side or under_sight[1][2]
         ANGLE_REF = under_sight[1][3]
-        measured = grid_step(seen, SIDE_REF)
+        # Масштаб для замера шага — сторона метки В ЭТОМ кадре, не эталон из другого:
+        # между спокойным кадром и этим дрон мог всплыть, и шаг вышел бы кривым.
+        measured = grid_step(seen, under_sight[1][2])
         fruit = ", ".join(name for name, _, _ in apples(img))
         print("=" * 54, flush=True)
         print(f">>> СТАРТОВЫЙ МАРКЕР: {under}  (узел {node(under)})", flush=True)
@@ -581,10 +651,15 @@ def scan(drone):
             STEP_M = measured
         else:
             print(f">>> ШАГ СЕТКИ: соседей в кадре нет, оставляем {STEP_M:.2f} м", flush=True)
-        if under in FIGURES:
-            print(f">>> НАЗНАЧЕННАЯ ФИГУРА: {FIGURES[under]}", flush=True)
+        # Фигуру назначает УГЛОВАЯ метка (Приложение 3). Обычно она и есть метка под
+        # дроном, но если дрон сдуло на соседний узел — берём ближайшую угловую из
+        # кадра: иначе потеряли бы баллы за декодирование на пустом месте.
+        corner = nearest({i: v for i, v in seen.items() if i in FIGURES},
+                         (img.shape[1] / 2.0, img.shape[0] / 2.0))
+        if corner is None:
+            print(">>> ФИГУРА НЕ ОПРЕДЕЛЕНА: угловой метки в кадре нет", flush=True)
         else:
-            print(">>> ФИГУРА НЕ ОПРЕДЕЛЕНА: метка не угловая", flush=True)
+            print(f">>> МАРКЕР УГЛА: {corner[0]} → ФИГУРА: {FIGURES[corner[0]]}", flush=True)
         print(f">>> ВИДНО МЕТОК: {' '.join(str(i) for i in sorted(seen))}", flush=True)
         print(f">>> ЯБЛОКИ: {fruit or 'не видно'}", flush=True)
         print("=" * 54, flush=True)
@@ -602,8 +677,14 @@ def main():
         deadline = time.time() + SEARCH_LIMIT_S
         # Набор высоты на своей, пониженной скорости: чем мягче взлёт, тем меньше
         # раскачка наверху. Пауза — время самого набора плюс запас на успокоение.
-        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=CLIMB_SPEED,
-                               frame_id="body", auto_arm=True)
+        resp = drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=CLIMB_SPEED,
+                                      frame_id="body", auto_arm=True)
+        print(f"взлёт: {getattr(resp, 'success', '?')} {getattr(resp, 'message', '')}",
+              flush=True)
+        if resp is not None and not getattr(resp, "success", True):
+            # Не встал в OFFBOARD или не заармился: дальше лететь нечем, и три минуты
+            # «поиска яблок» дрон просто простоял бы на земле.
+            raise RuntimeError("взлёт не принят — миссия отменена")
         time.sleep(ALT / CLIMB_SPEED + SETTLE_S)
 
         start = scan(drone)
@@ -612,6 +693,7 @@ def main():
             print("без стартовой метки поиск невозможен", flush=True)
         else:
             print(f"ПОИСК ЯБЛОК: {SEARCH_LIMIT_S:.0f} с или {APPLES_TOTAL} шт.", flush=True)
+            here = start
             for target in search_route(start):
                 if len(found) >= APPLES_TOTAL:
                     print("все яблоки найдены", flush=True)
@@ -619,21 +701,36 @@ def main():
                 if time.time() > deadline:
                     print("время на поиск вышло", flush=True)
                     break
-                goto(drone, target, found)
+                # Сбой на одном узле не должен ронять всю попытку: доложили и летим
+                # дальше. Ctrl+C и KILL SWITCH этим не перехватываются — они уводят
+                # программу сразу на посадку.
+                try:
+                    goto(drone, target, found, deadline)
+                except Exception as exc:
+                    print(f"          узел {target}: сбой — {exc}", flush=True)
+                here = target
 
             listing = ", ".join(f"{c} {at((col, row))}" for c, col, row in found)
             print("=" * 54, flush=True)
             print(f">>> НАЙДЕНО ЯБЛОК: {len(found)}/{APPLES_TOTAL} "
                   f"({listing or 'ни одного'})", flush=True)
             print("=" * 54, flush=True)
+            # Возврат — тоже по соседним узлам (п. 2.1.3), а не одним броском через
+            # поле: и регламент соблюдён, и дрон всю дорогу видит метки под собой.
             print(f"ВОЗВРАТ на стартовую метку {start}", flush=True)
-            goto(drone, start, found)
+            for target in walk(here, start) or [start]:
+                try:
+                    goto(drone, target, found)
+                except Exception as exc:
+                    print(f"          узел {target}: сбой — {exc}", flush=True)
     finally:
         # Взлетели — обязаны сесть, чем бы ни кончился полёт.
         try:
             print("ПОСАДКА", flush=True)
             resp = drone.control.land(timeout=10.0)
-            print("land:", resp.success, resp.message, flush=True)
+            print("land:", getattr(resp, "success", "?"), getattr(resp, "message", ""),
+                  flush=True)
+            time.sleep(8.0)     # дать сесть, прежде чем гасить ноду
         finally:
             drone.close()
 
