@@ -338,6 +338,9 @@ def parse_args() -> argparse.Namespace:
                    help="сколько рядов меток «видно» при планировании: 1 = обойти все узлы")
     p.add_argument("--nav", default="blind", choices=["blind", "markers"],
                    help="blind — счисление пути, markers — наведение по ArUco")
+    p.add_argument("--strategy", default="", choices=["", "auto", "aruco_frame", "visual"],
+                   help="как лететь к метке при --nav markers: "
+                        "aruco_frame (по tf2-фрейму) | visual (по кадру) | auto")
     p.add_argument("--no-return", action="store_true",
                    help="не возвращаться на стартовый узел перед посадкой")
     p.add_argument("--dry-run", action="store_true", help="показать маршрут и выйти")
@@ -355,8 +358,15 @@ def main() -> int:
             config.flight.__post_init__()      # потолок высоты проверяется здесь
         if args.speed:
             config.flight.speed = args.speed
+        if args.strategy:
+            config.navigation.strategy = args.strategy
     except ValueError as exc:
         print(f"Конфиг отклонён: {exc}")
+        return 1
+
+    if args.strategy and args.nav != "markers":
+        print("--strategy действует только при --nav markers; сейчас навигация "
+              f"«{args.nav}» — метки в перелёте не участвуют.")
         return 1
 
     try:
@@ -367,9 +377,12 @@ def main() -> int:
 
     numbering = config.markers.numbering()
     print(f"Старт: метка {args.start} → узел {start}")
+    nav_note = (f"навигация по меткам ArUco (стратегия {config.navigation.strategy})"
+                if args.nav == "markers" else
+                f"навигация вслепую, счислением (шаг сетки {args.step:.2f} м, метки не участвуют)")
     print(f"Маршрут: {len(route) - 1} перелётов, "
-          f"высота {config.flight.altitude:.2f} м, скорость {config.flight.speed:.2f} м/с, "
-          f"навигация {args.nav}")
+          f"высота {config.flight.altitude:.2f} м, скорость {config.flight.speed:.2f} м/с")
+    print(nav_note)
     print(field.render(route, start))
 
     if args.dry_run:
