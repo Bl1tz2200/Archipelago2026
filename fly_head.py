@@ -17,7 +17,7 @@
 
     drone.control.navigate(x, y, z, yaw, speed, frame_id="body", auto_arm=...)
     time.sleep(...)
-    drone.control.land(timeout=10.0)
+    drone.control.land()
 
 Никакого offboard-управления setpoint'ами, никакой телеметрии, никаких координат.
 Дрон ориентируется только по меткам: цель перелёта — метка, признак прилёта —
@@ -64,6 +64,9 @@ TRIES = 8           # попыток довести дрон до одной м�
 ALT_FIX = 0.3       # предел поправки высоты за одну команду, м
 LOOK_UP = 0.3       # на столько подняться, если меток не видно вовсе, м
 BLIND_FRAMES = 2    # столько кадров подряд без единой метки — и поднимаемся
+CLIMB_MAX = 1.0     # выше рабочей высоты вслепую не подниматься, м (потолок п. 2.6.3 — 4 м)
+HOP_MAX_STEPS = 2.0 # длиннее этого (в шагах сетки) одна команда перелёта не бывает
+HOP_PAD = 0.8       # запас к паузе перелёта на разгон, торможение и успокоение, с
 
 # Приложение 3: фигура назначается по ID маркера того угла, откуда стартуем.
 # Угол заранее не сообщается — читаем метку под дроном сразу после взлёта.
@@ -73,6 +76,8 @@ SEARCH_ROW_STEP = 2     # облёт через строку: на все 49 у�
 SEARCH_LIMIT_S = 180.0  # п. 2.1.3: на сборку формации — не более 3 минут от взлёта лидера
 APPLES_TOTAL = 3        # п. 2.1.2: на полигоне три «яблока»
 HOVER_S = 2.0           # зависание над яблоком — время взлёта хвостового дрона
+LAND_TRIES = 3          # столько раз повторить команду посадки, если её не приняли
+LAND_S = 8.0            # ждать снижения после принятой посадки, прежде чем гасить ноду
 MERGE_STEPS = 0.6       # два пятна ближе этой доли шага сетки — одно и то же яблоко
 
 # Цвета «яблок» в HSV: H 0..179, S 0..255, V 0..255.
@@ -253,6 +258,7 @@ def nearest(seen, center):
 
 SIDE_REF = 0.0      # сторона метки на рабочей высоте, пиксели (замер после взлёта)
 ANGLE_REF = None    # поворот меток в кадре на взлёте — «нос смотрит туда же, что и тогда»
+BLIND_UP = 0.0      # сколько уже набрано вслепую сверх рабочей высоты, м
 
 
 def alt_by_side(side):
@@ -417,13 +423,84 @@ def fly(drone, forward, left, up=0.0):
     distance = math.hypot(forward, left)
     if distance < 0.05 and abs(up) < 0.05:
         return
+
+    # Одна команда длиннее пары шагов сетки — это почти всегда ошибка: не та метка
+    # опознана или узел маршрута пропущен, и цель посчиталась от далёкой опоры.
+    # Летим только часть: контур замкнут по меткам, следующий кадр доведёт остаток.
+    limit = HOP_MAX_STEPS * STEP_M
+    if distance > limit:
+        print(f"          перелёт {distance:.1f} м урезан до {limit:.1f} м", flush=True)
+        forward, left = forward * limit / distance, left * limit / distance
+        distance = limit
+
     resp = drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
                                   speed=SPEED, frame_id="body", auto_arm=False)
     # Отказ navigate виден только здесь: дрон просто не двинется, а наведение будет
     # раз за разом слать ту же команду. В логе это должно быть видно сразу.
     if resp is not None and not getattr(resp, "success", True):
         print(f"          navigate отказал: {getattr(resp, 'message', '')}", flush=True)
-    time.sleep(math.hypot(distance, up) / SPEED + 0.5)
+    # navigate возвращается сразу, дрон летит в фоне — ждать окончания приходится
+    # паузой. Время в пути считается по длине с вертикалью, а HOP_PAD добавлен на
+    # разгон, торможение и успокоение: снимок, сделанный на ещё летящем дроне, даёт
+    # промах и раскачку. Дрон дёргается на каждом шаге — увеличивать надо HOP_PAD.
+    time.sleep(math.hypot(distance, up) / SPEED + HOP_PAD)
+
+
+def touch_down(drone):
+    """Посадить дрон. Команда повторяется, пока её не примут.
+
+    Единственный вызов `land()` — слишком слабая гарантия для конца полёта: он может
+    вернуть success=False или бросить исключение, и дрон останется в воздухе, а нода
+    погаснет. Отдельно подстрахована сигнатура: в документации `land()` описан без
+    аргументов, а `timeout` — нет, и на другой сборке библиотеки он даёт TypeError.
+    """
+    for attempt in range(1, LAND_TRIES + 1):
+        try:
+            try:
+                resp = drone.control.land()
+            except TypeError:                       # сборка со старой сигнатурой
+                resp = drone.control.land(timeout=10.0)
+        except Exception as exc:
+            print(f"ПОСАДКА: попытка {attempt} сорвалась — {exc}", flush=True)
+            time.sleep(1.0)
+            continue
+
+        ok = resp is None or getattr(resp, "success", True)
+        print(f"ПОСАДКА: попытка {attempt} — {getattr(resp, 'success', '?')} "
+              f"{getattr(resp, 'message', '')}", flush=True)
+        if ok:
+            time.sleep(LAND_S)      # дать сесть, прежде чем гасить ноду
+            return True
+        time.sleep(1.0)
+
+    print("!!! ПОСАДКА НЕ ПРИНЯТА — сажайте с пульта !!!", flush=True)
+    return False
+
+
+def climb(drone):
+    """Подняться осмотреться, когда меток не видно, — но не выше предела.
+
+    Пока метки нет, высоту проверить нечем: `hold_alt` работает по её размеру в
+    кадре. Значит подъём вслепую надо считать самим и вовремя останавливаться,
+    иначе дрон, потерявший поле, будет набирать высоту до самого потолка зоны
+    (п. 2.6.3 — не выше 4 м). Как только метка нашлась, счётчик обнуляется:
+    дальше высоту держит `hold_alt`.
+    """
+    global BLIND_UP
+    if BLIND_UP + LOOK_UP > CLIMB_MAX:
+        print(f"          выше не поднимаемся: набрано {BLIND_UP:.1f} м вслепую",
+              flush=True)
+        return
+    BLIND_UP += LOOK_UP
+    print(f"          меток не видно — поднимаемся осмотреться (+{BLIND_UP:.1f} м)",
+          flush=True)
+    fly(drone, 0.0, 0.0, LOOK_UP)
+
+
+def grounded():
+    """Метка снова в кадре: высоту опять держит `hold_alt`, подъём вслепую забыт."""
+    global BLIND_UP
+    BLIND_UP = 0.0
 
 
 def settle(drone):
@@ -468,11 +545,13 @@ def settle(drone):
 
 
 def approach(drone, colour):
-    """Подвестись над яблоком нужного цвета.
+    """Подвестись над яблоком нужного цвета: (место на поле, долетели ли).
 
-    Возвращает место яблока на поле — (столбец, строка) в узлах — или None, если
-    яблоко или метки пропали из кадра. Место считается по последнему кадру, когда
-    дрон уже над яблоком: так оно точнее всего.
+    Место — (столбец, строка) в узлах сетки или None, если яблока с самого начала
+    не разглядеть. Второе значение честно говорит, встал ли дрон над яблоком: оно
+    False и когда яблоко потерялось из кадра, и когда попытки кончились на подлёте.
+    Раньше обоими случаями возвращалась просто последняя оценка места, и вызывающий
+    считал их успехом.
     """
     where = None
     for _ in range(TRIES):
@@ -483,7 +562,7 @@ def approach(drone, colour):
 
         spot = next((s for s in apples(img) if s[0] == colour), None)
         if spot is None:
-            return where
+            return where, False
 
         height, width = img.shape[:2]
         cx, cy = width / 2.0, height / 2.0
@@ -492,16 +571,17 @@ def approach(drone, colour):
         # Масштаб кадра — по стороне видимой метки; без метки метров не посчитать.
         base = nearest(markers(img), (cx, cy))
         if base is None:
-            return where
+            return where, False
+        grounded()
         where = place(base, x, y)
 
         if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
             fly(drone, 0.0, 0.0, hold_alt(base[1][2]))   # над яблоком — вернуть высоту
-            return where
+            return where, True
         # GAIN < 1: не отрабатываем весь промах разом, иначе дрон проскакивает цель.
         scale = MARKER_M / base[1][2] * GAIN
         fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(base[1][2]))
-    return where
+    return where, False
 
 
 def watch(drone, base, fruit, found):
@@ -522,12 +602,16 @@ def watch(drone, base, fruit, found):
             continue
 
         # Место с края кадра прикидочное, поэтому подлетаем и уточняем его над яблоком.
-        where = approach(drone, colour)
+        where, reached = approach(drone, colour)
         if where is None or counted(found, colour, where):
             continue
 
+        # Баллы регламент даёт за РАСПОЗНАВАНИЕ (п. 2.1.2), поэтому яблоко
+        # засчитывается и когда встать точно над ним не вышло. Но в логе это должно
+        # быть видно: зависание не над яблоком — повод проверить настройки на месте.
         found.append((colour, where[0], where[1]))
-        print(f">>> ЯБЛОКО {len(found)}/{APPLES_TOTAL}: {colour} {at(where)} — "
+        print(f">>> ЯБЛОКО {len(found)}/{APPLES_TOTAL}: {colour} {at(where)}"
+              f"{'' if reached else ' (встать над ним не вышло)'} — "
               f"зависаем {HOVER_S} с (здесь взлетает дрон {len(found) + 1})", flush=True)
         time.sleep(HOVER_S)
         return True
@@ -580,14 +664,14 @@ def goto(drone, target, found, deadline=None):
             # метка найдётся, hold_alt сам вернёт дрон на рабочую высоту.
             blind += 1
             if blind >= BLIND_FRAMES:
-                print("          меток не видно — поднимаемся осмотреться", flush=True)
-                fly(drone, 0.0, 0.0, LOOK_UP)
+                climb(drone)
                 blind = 0
             else:
                 time.sleep(0.5)
             continue
 
         blind = 0
+        grounded()
         base_id, (x, y, side, angle) = base
         scale = MARKER_M / side
         dcol = node(target)[0] - node(base_id)[0]
@@ -627,13 +711,13 @@ def scan(drone):
             # стартовой метки не будет ни фигуры, ни маршрута, так что пробуем всерьёз.
             blind += 1
             if blind >= BLIND_FRAMES:
-                print("меток не видно — поднимаемся осмотреться", flush=True)
-                fly(drone, 0.0, 0.0, LOOK_UP)
+                climb(drone)
                 blind = 0
             else:
                 print("меток не видно, ищем…", flush=True)
                 time.sleep(0.5)
             continue
+        grounded()
         under_sight = nearest(seen, (img.shape[1] / 2.0, img.shape[0] / 2.0))
         under = under_sight[0]
         SIDE_REF = calm_side or under_sight[1][2]
@@ -705,10 +789,13 @@ def main():
                 # дальше. Ctrl+C и KILL SWITCH этим не перехватываются — они уводят
                 # программу сразу на посадку.
                 try:
-                    goto(drone, target, found, deadline)
+                    # `here` — последний УСПЕШНО пройденный узел: от него потом
+                    # строится возврат. Пропущенный узел им не становится, иначе
+                    # возврат считался бы от точки, где дрона не было.
+                    if goto(drone, target, found, deadline):
+                        here = target
                 except Exception as exc:
                     print(f"          узел {target}: сбой — {exc}", flush=True)
-                here = target
 
             listing = ", ".join(f"{c} {at((col, row))}" for c, col, row in found)
             print("=" * 54, flush=True)
@@ -727,10 +814,7 @@ def main():
         # Взлетели — обязаны сесть, чем бы ни кончился полёт.
         try:
             print("ПОСАДКА", flush=True)
-            resp = drone.control.land(timeout=10.0)
-            print("land:", getattr(resp, "success", "?"), getattr(resp, "message", ""),
-                  flush=True)
-            time.sleep(8.0)     # дать сесть, прежде чем гасить ноду
+            touch_down(drone)
         finally:
             drone.close()
 
