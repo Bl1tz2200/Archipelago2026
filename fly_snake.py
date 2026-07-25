@@ -183,9 +183,6 @@ def nearest(seen, center):
 #  ПОЛЁТ
 # ═══════════════════════════════════════════════════════════════════════
 
-absX = 0.0
-absY = 0.0
-
 
 def fly(drone, forward, left):
     """Смещение по корпусу: x вперёд, y влево. Команда и пауза на перелёт — как в примере."""
@@ -195,15 +192,9 @@ def fly(drone, forward, left):
 
 
     
-    drone.control.navigate(x=float(forward), y=float(left), z=0.0, yaw=YAW,
+    drone.control.navigate(x=float(forward), y=float(left), z=-0.5, yaw=YAW,
                            speed=SPEED, frame_id="body", auto_arm=False)
 
-    time.sleep(0.5)
-    absX+= float(forward)
-    absY+= float(left)
-
-    drone.control.navigate(x=absX, y=absY, z=ALT, yaw=YAW, speed=1,
-                                   frame_id="map", auto_arm=True)
     
     time.sleep(distance / SPEED + 0.5)
 
@@ -281,23 +272,9 @@ def main():
     try:
         print(f"ВЗЛЁТ на {ALT} м", flush=True)
 
-        drone.control.navigate(x=0.0, y=0.0, z=ALT/8, yaw=YAW, speed=1,
-                               frame_id="map", auto_arm=True)
+        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=SPEED,
+                               frame_id="body", auto_arm=True)
 
-        time.sleep(0.2)
-
-        drone.control.navigate(x=0.0, y=0.0, z=ALT/4, yaw=YAW, speed=1,
-                               frame_id="map", auto_arm=True)
-
-        time.sleep(0.2)
-
-        drone.control.navigate(x=0.0, y=0.0, z=ALT/2, yaw=YAW, speed=1,
-                               frame_id="map", auto_arm=True)
-
-        time.sleep(0.2)
-
-        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=1,
-                               frame_id="map", auto_arm=True)
         time.sleep(5.0)
 
         scan(drone)
