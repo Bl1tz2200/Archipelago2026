@@ -214,15 +214,32 @@ class LeaderMission:
             self.result.notes.append(f"взлёт не прошёл: {exc}")
             return False
 
-        deadline = time.monotonic() + self.config.flight.takeoff_timeout
-        while time.monotonic() < deadline:
-            height = self.navigator.altitude()
-            if height is not None and height >= alt * 0.85:
-                self._log(f"на высоте {height:.2f} м")
-                return True
-            time.sleep(0.3)
+        if self._wait_altitude(alt, tolerance=alt * 0.15):
+            return True
         self.result.notes.append("высота не подтверждена телеметрией, продолжаем")
         return True
+
+    def _wait_altitude(self, target: float, tolerance: float) -> bool:
+        """Ждёт выхода на высоту по телеметрии; без телеметрии — просто выдерживает паузу.
+
+        Пауза — это то же `time.sleep()` после команды взлёта, что и в базовом примере
+        полёта: если FCU телеметрию не отдаёт, опрашивать её до самого таймаута
+        бессмысленно, а взлететь дрону всё равно нужно.
+        """
+        started = time.monotonic()
+        deadline = started + self.config.flight.takeoff_timeout
+        pause_over = started + self.config.flight.takeoff_pause
+        while time.monotonic() < deadline:
+            height = self.navigator.altitude()
+            if height is not None and height >= target - tolerance:
+                self._log(f"на высоте {height:.2f} м")
+                return True
+            if height is None and time.monotonic() >= pause_over:
+                self._log(f"телеметрии нет — выдержали паузу "
+                          f"{self.config.flight.takeoff_pause:.0f} с, летим дальше")
+                return True
+            time.sleep(0.3)
+        return False
 
     def identify_start(self, timeout: float = 12.0) -> Optional[Node]:
         """Считывает стартовый маркер и печатает ID с названием фигуры."""
@@ -333,12 +350,8 @@ class LeaderMission:
             self.result.notes.append(f"смена высоты не прошла: {exc}")
             return False
         self.config.flight.altitude = altitude
-        deadline = time.monotonic() + self.config.flight.takeoff_timeout
-        while time.monotonic() < deadline:
-            height = self.navigator.altitude()
-            if height is not None and abs(height - altitude) <= 0.15:
-                return True
-            time.sleep(0.2)
+        if self._wait_altitude(altitude, tolerance=0.15):
+            return True
         self.result.notes.append(f"высота {altitude:.2f} м не подтверждена телеметрией")
         return True
 
@@ -350,6 +363,7 @@ class LeaderMission:
         index = 1
 
         # Встаём точно над стартовой меткой: дальше весь маршрут отсчитывается от неё.
+        self.navigator.set_node(plan.start)
         self.navigator.stabilize(plan.start)
         self._search_active = True
 
@@ -370,6 +384,9 @@ class LeaderMission:
             node = route[index]
             result = self.navigator.goto(node)
             if result.paused:
+                # Дрон завис между узлами; навигатор помнит, где именно, — с этого
+                # места и продолжим тот же перелёт после подъёма следующего дрона.
+                self.current_node = self.navigator.node or self.current_node
                 self.handle_apple()
                 continue
             if not result.ok:

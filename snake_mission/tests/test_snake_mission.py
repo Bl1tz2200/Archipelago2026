@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -15,6 +16,7 @@ from snake_mission.config import (  # noqa: E402
     ALTITUDE_CEILING_M,
     FlightConfig,
     MarkersConfig,
+    NavigationConfig,
     SearchConfig,
     load_config,
 )
@@ -274,12 +276,120 @@ def test_markers_config_builds_numbering():
     assert numbering.node_of(numbering.marker_id((2, 4))) == (2, 4)
 
 
+def test_navigation_config_rejects_unknown_strategy():
+    for bad in ("offboard", "body", ""):
+        try:
+            NavigationConfig(strategy=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"стратегия {bad!r} должна быть отклонена")
+
+
+# ─────────────────────────────────────── перелёт по корпусу (body_step)
+
+class _Recorder:
+    """Дрон-заглушка: запоминает команды и не даёт вызвать ничего лишнего."""
+
+    class Control:
+        def __init__(self) -> None:
+            self.calls = []
+            self.setpoints = 0
+            self.telemetry_calls = 0
+
+        def navigate(self, **kwargs):
+            self.calls.append(kwargs)
+
+        def set_position(self, **kwargs):
+            self.setpoints += 1        # низкоуровневый offboard-setpoint: быть не должно
+
+        def get_telemetry(self, frame_id="map"):
+            self.telemetry_calls += 1
+            return None
+
+    def __init__(self) -> None:
+        self.control = _Recorder.Control()
+
+
+def _body_navigator(should_pause=None, step_m: float = 1.0):
+    from snake_mission.config import MissionConfig
+    from snake_mission.navigator import MarkerNavigator
+
+    config = MissionConfig()
+    config.navigation.strategy = "body_step"
+    config.navigation.step_m = step_m
+    config.navigation.settle_pause = 0.0
+    drone = _Recorder()
+    nav = MarkerNavigator(drone, config, should_pause=should_pause, verbose=False)
+    return nav, drone
+
+
+def test_body_step_sends_one_navigate_per_hop():
+    """Перелёт — ровно одна команда navigate по корпусу, как в базовом примере."""
+    nav, drone = _body_navigator(step_m=0.8)
+    nav.set_node((3, 3))
+    result = nav.goto((4, 3))                      # столбец +1 → вправо, то есть y в минус
+
+    assert result.ok and result.reason == "arrived", result.reason
+    assert len(drone.control.calls) == 1, drone.control.calls
+    call = drone.control.calls[0]
+    assert call["frame_id"] == "body" and call["auto_arm"] is False
+    assert (round(call["x"], 6), round(call["y"], 6), call["z"]) == (0.0, -0.8, 0.0)
+    assert nav.node == (4, 3)
+    # Ни setpoint'ов offboard, ни телеметрии, ни камеры в перелёте не участвует.
+    assert drone.control.setpoints == 0
+    assert drone.control.telemetry_calls == 0
+
+
+def test_body_step_hop_along_rows_goes_forward():
+    """Строка +1 — это «вперёд» по корпусу (FLU), столбцы курса не меняют."""
+    nav, drone = _body_navigator()
+    nav.set_node((2, 2))
+    nav.goto((2, 3))
+    call = drone.control.calls[0]
+    assert (round(call["x"], 6), round(call["y"], 6)) == (1.0, 0.0)
+
+
+def test_body_step_stops_mid_hop_on_apple():
+    """Яблоко останавливает дрон посреди перелёта, а положение считается по пройденному пути."""
+    import time
+
+    paused = {"value": False}
+    nav, drone = _body_navigator(should_pause=lambda: paused["value"])
+    nav.config.flight.speed = 0.5                  # 4 узла по 1 м → 8 с перелёта
+    nav.set_node((0, 0))
+
+    def trip() -> None:
+        time.sleep(0.4)
+        paused["value"] = True
+
+    threading.Thread(target=trip, daemon=True).start()
+    result = nav.goto((0, 4))
+
+    assert not result.ok and result.paused, result.reason
+    assert nav.node == (0, 0), nav.node          # улетели меньше чем на полшага
+    assert 0.0 < nav._pos[1] < 1.0, nav._pos     # но уже не в исходной точке
+
+
+def test_freeze_holds_by_body_frame_without_offboard_setpoints():
+    """Зависание — тот же navigate на нулевое смещение, без set_position."""
+    nav, drone = _body_navigator()
+    assert nav.freeze()
+    call = drone.control.calls[-1]
+    assert call["frame_id"] == "body"
+    assert (call["x"], call["y"], call["z"]) == (0.0, 0.0, 0.0)
+    assert drone.control.setpoints == 0
+
+    nav.hold(0.1)                                  # удержание — тоже без set_position
+    assert drone.control.setpoints == 0
+
+
 # ──────────────────────────────────────────── симулятор: миссия целиком
 
 def _sim_config(scale: float):
     """Конфиг для прогона в симуляторе: время сжато, поэтому сжаты и все паузы."""
     config = load_config()
     config.formation_budget /= scale
+    config.navigation.time_scale = scale     # паузы перелёта — в том же сжатом времени
     config.swarm.join_wait_s = 0.2
     config.swarm.join_timeout = 2.0
     config.search.step_time_s /= scale

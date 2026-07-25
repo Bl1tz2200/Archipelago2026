@@ -76,6 +76,9 @@ def main() -> int:
     # ожидания роя сжимаются во столько же раз — иначе 3 минуты регламента
     # оказались бы недостижимо щедрыми.
     config.formation_budget = config.formation_budget / args.scale
+    config.navigation.step_m = args.step         # шаг сетки — тот же, что у площадки
+    config.navigation.time_scale = args.scale    # и паузы перелёта в том же сжатом времени
+    config.navigation.__post_init__()
     config.swarm.join_wait_s = config.swarm.join_wait_s / args.scale
     config.swarm.join_timeout = config.swarm.join_timeout / args.scale
     config.search.step_time_s /= args.scale

@@ -198,6 +198,8 @@ class Flight:
 
         total = len(route) - 1
         position = route[0]
+        if self.navigator is not None:
+            self.navigator.set_node(position)   # счисление для стратегии body_step
         self._log(f"маршрут: {total} перелётов, старт из узла {position}")
 
         for index, node in enumerate(route[1:], start=1):
@@ -338,9 +340,10 @@ def parse_args() -> argparse.Namespace:
                    help="сколько рядов меток «видно» при планировании: 1 = обойти все узлы")
     p.add_argument("--nav", default="blind", choices=["blind", "markers"],
                    help="blind — счисление пути, markers — наведение по ArUco")
-    p.add_argument("--strategy", default="", choices=["", "auto", "aruco_frame", "visual"],
-                   help="как лететь к метке при --nav markers: "
-                        "aruco_frame (по tf2-фрейму) | visual (по кадру) | auto")
+    p.add_argument("--strategy", default="",
+                   choices=["", "body_step", "auto", "aruco_frame", "visual"],
+                   help="как лететь к метке при --nav markers: body_step (navigate по "
+                        "корпусу) | aruco_frame (по tf2-фрейму) | visual (по кадру) | auto")
     p.add_argument("--no-return", action="store_true",
                    help="не возвращаться на стартовый узел перед посадкой")
     p.add_argument("--dry-run", action="store_true", help="показать маршрут и выйти")
@@ -360,6 +363,8 @@ def main() -> int:
             config.flight.speed = args.speed
         if args.strategy:
             config.navigation.strategy = args.strategy
+        config.navigation.step_m = args.step
+        config.navigation.__post_init__()   # стратегия и шаг сетки проверяются здесь
     except ValueError as exc:
         print(f"Конфиг отклонён: {exc}")
         return 1

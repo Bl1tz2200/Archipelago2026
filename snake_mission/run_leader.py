@@ -32,8 +32,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="", help="путь к YAML-конфигу (по умолчанию config/snake.yaml)")
     p.add_argument("--alt", type=float, default=0.0, help="высота поиска, м (потолок 3.0)")
     p.add_argument("--speed", type=float, default=0.0, help="скорость перелёта, м/с")
-    p.add_argument("--strategy", default="", choices=["", "auto", "aruco_frame", "visual"],
-                   help="как лететь к метке")
+    p.add_argument("--strategy", default="",
+                   choices=["", "body_step", "auto", "aruco_frame", "visual"],
+                   help="как лететь: body_step (navigate по корпусу, штатно) | "
+                        "aruco_frame | visual | auto")
+    p.add_argument("--step", type=float, default=0.0,
+                   help="шаг сетки меток на площадке, м (для --strategy body_step)")
     p.add_argument("--no-land", action="store_true", help="не садиться: зависнуть на старте")
     p.add_argument("--quiet", action="store_true", help="без подробного вывода")
     p.add_argument("--dry-run", action="store_true",
@@ -53,6 +57,10 @@ def apply_overrides(config, args: argparse.Namespace):
         config.flight.speed = args.speed
     if args.strategy:
         config.navigation.strategy = args.strategy
+        config.navigation.__post_init__()   # допустимость стратегии проверяется здесь
+    if args.step:
+        config.navigation.step_m = args.step
+        config.navigation.__post_init__()
     if args.no_land:
         config.flight.land_at_end = False
     return config

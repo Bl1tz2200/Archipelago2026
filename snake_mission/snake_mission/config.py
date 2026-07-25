@@ -24,12 +24,19 @@ ALTITUDE_CEILING_M = 3.0
 # Регламент, п. 2.1.3: на сборку формации не более 3 минут с момента взлёта лидера.
 FORMATION_BUDGET_S = 180.0
 
+# Способы перелёта между узлами. `body_step` — штатный: одна команда
+# `navigate(frame_id="body")` на шаг сетки и пауза на перелёт, ровно как в базовом
+# примере полёта из документации. Остальные — наведение по камере/tf2, они держат
+# дрон в непрерывном цикле управления и включаются только вручную.
+STRATEGIES = ("body_step", "auto", "aruco_frame", "visual")
+
 
 @dataclass
 class FlightConfig:
     altitude: float = 2.5          # рабочая высота поиска, м (потолок 3.0)
     speed: float = 0.6             # скорость перелёта между метками, м/с
     takeoff_timeout: float = 20.0  # сколько ждать выхода на высоту, с
+    takeoff_pause: float = 8.0     # пауза после команды взлёта, если телеметрии нет, с
     yaw: float = 0.0               # курс держим постоянным весь поиск, рад
     land_at_end: bool = True       # садиться в конце (без этапа фигуры)
     auto_altitude: bool = True     # подняться ДО начала поиска, если маршрут не влезает в бюджет
@@ -59,7 +66,10 @@ class MarkersConfig:
 
 @dataclass
 class NavigationConfig:
-    strategy: str = "auto"             # auto | aruco_frame | visual
+    strategy: str = "body_step"        # body_step | auto | aruco_frame | visual
+    step_m: float = 1.0                # шаг сетки меток на площадке, м (для body_step)
+    settle_pause: float = 1.0          # запас на торможение после перелёта, с
+    time_scale: float = 1.0            # во сколько раз сжаты паузы перелёта; >1 — только симулятор
     arrive_tolerance: float = 0.10     # попадание в узел: доля диагонали кадра
     center_tolerance: float = 0.06     # стабилизация: доля диагонали кадра
     hold_frames: int = 3               # кадров подряд в допуске до «стабилизирован»
@@ -70,6 +80,15 @@ class NavigationConfig:
     frame_timeout: float = 1.0         # ожидание кадра с камеры, с
     poll_interval: float = 0.15        # период циклов управления, с
     frame_tolerance: float = 0.12      # попадание в узел по фрейму aruco_N, м
+
+    def __post_init__(self) -> None:
+        if self.strategy not in STRATEGIES:
+            raise ValueError(
+                f"navigation.strategy = {self.strategy!r}; допустимо: {', '.join(STRATEGIES)}")
+        if self.step_m <= 0:
+            raise ValueError("navigation.step_m должен быть больше нуля")
+        if self.time_scale <= 0:
+            raise ValueError("navigation.time_scale должен быть больше нуля")
 
 
 @dataclass

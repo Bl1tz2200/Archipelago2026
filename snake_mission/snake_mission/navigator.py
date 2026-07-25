@@ -5,13 +5,21 @@
 принадлежат самому дрону: его высота из телеметрии при переводе пикселей в смещение
 корпуса (`apple_vision.geometry.GroundProjector`).
 
-Две стратегии управления, выбор автоматический:
+Три стратегии управления:
 
+  0. `body_step` (штатная) — перелёт как в базовом примере полёта: одна команда
+     `navigate(x, y, z=0, frame_id="body")` на шаг сетки и пауза на время перелёта.
+     Никаких низкоуровневых setpoint'ов (`set_position`) и никакого непрерывного
+     цикла управления: команда ушла — дрон летит сам. Камера при этом продолжает
+     работать на «яблоки» и на разметку, но в управление не вмешивается.
   1. `aruco_frame` — `navigate(x=0, y=0, z=alt, frame_id="aruco_<ID>")`: пересчёт делает
      сам Обрик через tf2 (`docs-sverk/obrik-ros-2/24-coordinate-frames.md`).
   2. `visual` — метка ищется в кадре, пиксельное смещение переводится в смещение
      корпуса и отправляется как `navigate(frame_id="body")`. Работает даже если
      фреймы `aruco_<N>` в системе не публикуются.
+
+Зависание (`freeze`/`hold`) во всех стратегиях — тоже обычный `navigate` на нулевое
+смещение по корпусу: текущая точка становится целевой.
 
 Все циклы управления на каждой итерации спрашивают `should_pause()`. Поэтому событие
 «яблоко» останавливает дрон посреди перелёта, а не по прилёте в узел, — как требует
@@ -34,6 +42,9 @@ from .field import Node, Numbering
 from .markers import MarkerDetector, Sight
 
 PauseCheck = Callable[[], bool]
+
+# Сколько ждать ответа `get_telemetry`, прежде чем считать телеметрию недоступной.
+TELEMETRY_TIMEOUT_S = 2.0
 
 
 @dataclass
@@ -84,12 +95,18 @@ class MarkerNavigator:
         self.strategy = config.navigation.strategy
         self.last_sights: List[Sight] = []
         self.frames_seen = 0
+        # Где дрон находится по счислению — нужно `body_step`, чтобы знать, на сколько
+        # узлов смещаться. Обновляется через `set_node()` и после каждого перелёта.
+        # `_pos` — то же самое, но дробное: зависание может застать дрон между узлами.
+        self.node: Optional[Node] = None
+        self._pos: Optional[List[float]] = None
 
         self._frame: Optional[np.ndarray] = None
         self._sights: List[Sight] = []
         self._seq = 0
         self._lock = threading.Lock()
         self._last_command_at = 0.0
+        self._telemetry_stuck = False
 
     # --------------------------------------------------------------- кадры
 
@@ -125,12 +142,32 @@ class MarkerNavigator:
     # ---------------------------------------------------------- телеметрия
 
     def telemetry(self, frame_id: str = "map"):
-        if self.drone is None:
+        """Телеметрия со сторожем: без данных от FCU `get_telemetry` не возвращается никогда.
+
+        Убить зависший вызов внутри ROS/DDS нельзя — его можно только бросить (поток
+        демонический). Первого зависания достаточно, чтобы больше не спрашивать: на
+        `body_step` телеметрия не нужна, а миссия не должна из-за неё стоять.
+        """
+        if self.drone is None or self._telemetry_stuck:
             return None
-        try:
-            return self.drone.control.get_telemetry(frame_id=frame_id)
-        except Exception:
+
+        box: dict = {}
+
+        def worker() -> None:
+            try:
+                box["value"] = self.drone.control.get_telemetry(frame_id=frame_id)
+            except BaseException:            # noqa: BLE001 — сюда же ошибки ROS
+                box["value"] = None
+
+        thread = threading.Thread(target=worker, name="snake_telemetry", daemon=True)
+        thread.start()
+        thread.join(TELEMETRY_TIMEOUT_S)
+        if thread.is_alive():
+            self._telemetry_stuck = True
+            self._log(f"телеметрия не отвечает (> {TELEMETRY_TIMEOUT_S:.0f} с) — "
+                      "дальше летим без неё")
             return None
+        return box.get("value")
 
     def altitude(self) -> Optional[float]:
         t = self.telemetry("terrain") or self.telemetry("map")
@@ -150,6 +187,10 @@ class MarkerNavigator:
 
     def probe_strategy(self) -> str:
         """Определяет, доступны ли фреймы `aruco_<N>`; фиксирует стратегию на всю миссию."""
+        if self.strategy == "body_step":
+            self._log(f"стратегия перелёта: body_step "
+                      f"(navigate по корпусу, шаг сетки {self.nav.step_m:.2f} м)")
+            return self.strategy
         if self.strategy in ("aruco_frame", "visual"):
             return self.strategy
         if self.drone is None:
@@ -231,9 +272,20 @@ class MarkerNavigator:
 
     # -------------------------------------------------------------- полёт
 
+    def set_node(self, node: Optional[Node]) -> None:
+        """Отмечает, над каким узлом дрон находится (счисление для `body_step`)."""
+        if node is None:
+            self.node = None
+            self._pos = None
+            return
+        self.node = (int(node[0]), int(node[1]))
+        self._pos = [float(node[0]), float(node[1])]
+
     def goto(self, node: Node, tolerance: Optional[float] = None,
              timeout: Optional[float] = None) -> NavResult:
         """Перелёт на метку узла `node`. Признак прилёта — метка у центра кадра."""
+        if self.strategy == "body_step":
+            return self.step_body(node)
         marker_id = self.numbering.marker_id(node)
         tolerance = self.nav.arrive_tolerance if tolerance is None else tolerance
         timeout = self.nav.goto_timeout if timeout is None else timeout
@@ -241,10 +293,85 @@ class MarkerNavigator:
 
     def stabilize(self, node: Node, timeout: Optional[float] = None) -> NavResult:
         """Стабилизация над меткой: центр кадра и низкая скорость несколько кадров подряд."""
+        if self.strategy == "body_step":
+            # Перелёт уже закончился паузой на торможение — доводить нечем и незачем.
+            self.set_node(node)
+            return NavResult(True, "arrived", None, 0.0)
         marker_id = self.numbering.marker_id(node)
         timeout = self.nav.stabilize_timeout if timeout is None else timeout
         return self._approach(marker_id, self.nav.center_tolerance, timeout,
                               hold_frames=self.nav.hold_frames, settle=True)
+
+    # ------------------------------------------------------ перелёт по корпусу
+
+    def step_body(self, target: Node) -> NavResult:
+        """Перелёт в узел одной командой `navigate(frame_id="body")` — как в примере.
+
+        Смещение считается по сетке от текущего узла: строки идут по «вперёд» корпуса,
+        столбцы — по «влево» с минусом (FLU), курс весь полёт постоянный, поэтому
+        корпус остаётся сонаправлен полю. Дальше — пауза на время перелёта; метка,
+        телеметрия и tf2 в этом пути не участвуют вообще.
+        """
+        started = time.monotonic()
+        if self._pos is None:
+            # Откуда летим — неизвестно, смещать не от чего: считаем, что уже на месте.
+            self.set_node(target)
+            return NavResult(False, "no_origin", None, 0.0)
+
+        dcol = target[0] - self._pos[0]
+        drow = target[1] - self._pos[1]
+        x = drow * self.nav.step_m
+        y = -dcol * self.nav.step_m
+        distance = math.hypot(x, y)
+        if distance < 1e-6:
+            self.set_node(target)
+            return NavResult(True, "arrived", None, 0.0)
+
+        if self.drone is None:
+            self.set_node(target)
+            return NavResult(False, "no_drone", None, time.monotonic() - started)
+
+        try:
+            self.drone.control.navigate(
+                x=float(x), y=float(y), z=0.0,
+                yaw=self.config.flight.yaw, speed=self.config.flight.speed,
+                frame_id="body", auto_arm=False,
+            )
+        except Exception as exc:
+            self._log(f"navigate(body) в {target} не прошёл: {exc}")
+            return NavResult(False, "command_failed", None, time.monotonic() - started)
+
+        # Ждём столько, сколько занимает перелёт на этой скорости, плюс запас на разгон
+        # и торможение. Пауза дробная: «яблоко» должно останавливать дрон посреди
+        # перелёта, а не по прилёте в узел (регламент, п. 2.1.2).
+        # (`time_scale` — только для симулятора, где время идёт быстрее реального;
+        # на дроне он равен единице и на расчёт не влияет.)
+        flying = distance / max(self.config.flight.speed, 0.05) / self.nav.time_scale
+        if not self._sleep_until(started + flying + self.nav.settle_pause / self.nav.time_scale):
+            # Прервались на полпути: положение по счислению — доля пути, пройденная
+            # к этому моменту. Без неё следующая команда ушла бы от старого узла и
+            # дала бы двойное смещение.
+            done = min(1.0, (time.monotonic() - started) / flying)
+            self._advance(dcol * done, drow * done)
+            return NavResult(False, "paused", None, time.monotonic() - started)
+
+        self.set_node(target)
+        return NavResult(True, "arrived", None, time.monotonic() - started)
+
+    def _advance(self, dcol: float, drow: float) -> None:
+        """Сдвигает счисляемое положение на долю шага сетки."""
+        if self._pos is None:
+            return
+        self._pos = [self._pos[0] + dcol, self._pos[1] + drow]
+        self.node = (int(round(self._pos[0])), int(round(self._pos[1])))
+
+    def _sleep_until(self, deadline: float, tick: float = 0.05) -> bool:
+        """Спит до `deadline`. False — если пришлось прерваться по `should_pause()`."""
+        while time.monotonic() < deadline:
+            if self.should_pause():
+                return False
+            time.sleep(min(tick, max(0.0, deadline - time.monotonic())))
+        return True
 
     def _approach(self, marker_id: int, tolerance: float, timeout: float,
                   hold_frames: int, settle: bool) -> NavResult:
@@ -302,17 +429,19 @@ class MarkerNavigator:
     # ------------------------------------------------------------ удержание
 
     def freeze(self) -> bool:
-        """Мгновенное зависание на месте: текущая точка становится целевой."""
+        """Мгновенное зависание на месте: нулевое смещение по корпусу — текущая точка.
+
+        Раньше здесь был `set_position(frame_id="map")` — низкоуровневый setpoint ноды
+        `offboard_control`. Он требует телеметрии map и на площадке дрон по нему не
+        летит, поэтому останов идёт тем же `navigate`, что и весь остальной полёт.
+        """
         if self.drone is None:
             return False
-        t = self.telemetry("map")
-        if t is None:
-            return False
         try:
-            self.drone.control.set_position(
-                x=float(t.x), y=float(t.y), z=float(t.z),
-                yaw=float(getattr(t, "yaw", self.config.flight.yaw) or 0.0),
-                frame_id="map",
+            self.drone.control.navigate(
+                x=0.0, y=0.0, z=0.0,
+                yaw=self.config.flight.yaw, speed=self.config.flight.speed,
+                frame_id="body", auto_arm=False,
             )
             return True
         except Exception as exc:
@@ -320,8 +449,8 @@ class MarkerNavigator:
             return False
 
     def hold(self, duration: float, until: Optional[Callable[[], bool]] = None,
-             refresh: float = 0.5) -> bool:
-        """Держит текущую точку `duration` секунд, обновляя цель.
+             refresh: float = 0.2) -> bool:
+        """Висит на месте `duration` секунд: одна команда останова и ожидание.
 
         `until` — необязательное условие досрочного выхода (например, «хвост встал в строй»).
         Возвращает True, если вышли по условию, False — если по времени.
@@ -329,21 +458,12 @@ class MarkerNavigator:
         if self.drone is None:
             time.sleep(min(duration, 0.1))
             return False
-        t = self.telemetry("map")
+        self.freeze()
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
             if until is not None and until():
                 return True
-            if t is not None:
-                try:
-                    self.drone.control.set_position(
-                        x=float(t.x), y=float(t.y), z=float(t.z),
-                        yaw=float(getattr(t, "yaw", self.config.flight.yaw) or 0.0),
-                        frame_id="map",
-                    )
-                except Exception:
-                    pass
-            time.sleep(refresh)
+            time.sleep(min(refresh, max(0.0, deadline - time.monotonic())))
         return bool(until is not None and until())
 
     # ------------------------------------------------------------- разное
