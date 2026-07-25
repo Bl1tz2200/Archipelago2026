@@ -9,6 +9,10 @@
 #   ./run.sh mission [ключи]  ЗАЧЁТНЫЙ ПОЛЁТ: навигация по меткам + поиск «яблок»
 #                             в одном процессе (это и есть «все системы» в воздухе)
 #
+#   ./run.sh flight  [ключи]  ПРОСТОЙ ПОЛЁТ: арм → взлёт → змейка по полю → посадка,
+#                             без «яблок» и роя. Ни один вызов не виснет молча —
+#                             у каждого свой таймаут, поэтому дрон всегда сядет.
+#
 #   ./run.sh markers [ключи]  только проверка поля меток   (snake_mission/tools/marker_check.py)
 #   ./run.sh apples  [ключи]  только распознавание «яблок» (apple_vision/run_apple_detect.py)
 #   ./run.sh plan    [ключи]  расчёт маршрута без дрона     (snake_mission/tools/plan_preview.py)
@@ -65,6 +69,10 @@ case "$cmd" in
     mission|fly|run)
         source_ros
         exec python3 snake_mission/run_leader.py "$@"
+        ;;
+    flight)
+        source_ros
+        exec python3 snake_mission/run_flight.py "$@"
         ;;
     markers)
         source_ros
