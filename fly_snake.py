@@ -290,9 +290,13 @@ def fly(drone, forward, left, up=0.0):
     distance = math.hypot(forward, left)
     if distance < 0.05 and abs(up) < 0.05:
         return
-    drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
-                           speed=SPEED, frame_id="body", auto_arm=False)
-    time.sleep(distance / SPEED + 0.5)
+    # Отказ команды печатается: молча продолжать наведение по не улетевшему дрону
+    # значит потом гадать, почему он стоял на месте. Пауза считает и вертикаль.
+    resp = drone.control.navigate(x=float(forward), y=float(left), z=float(up), yaw=YAW,
+                                  speed=SPEED, frame_id="body", auto_arm=False)
+    if resp is not None and not getattr(resp, "success", True):
+        print(f"          navigate отказал: {getattr(resp, 'message', '')}", flush=True)
+    time.sleep(math.hypot(distance, up) / SPEED + 0.5)
 
 
 def settle(drone):
@@ -448,8 +452,13 @@ def main():
         print(f"ВЗЛЁТ на {ALT} м", flush=True)
         # Набор высоты на своей, пониженной скорости: чем мягче взлёт, тем меньше
         # раскачка наверху. Пауза — время самого набора плюс запас на успокоение.
-        drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=CLIMB_SPEED,
-                               frame_id="body", auto_arm=True)
+        resp = drone.control.navigate(x=0.0, y=0.0, z=ALT, yaw=YAW, speed=CLIMB_SPEED,
+                                      frame_id="body", auto_arm=True)
+        print(f"взлёт: {getattr(resp, 'success', '?')} {getattr(resp, 'message', '')}",
+              flush=True)
+        if resp is not None and not getattr(resp, "success", True):
+            # Не встал в OFFBOARD или не заармился — облетать маршрут нечем.
+            raise RuntimeError("взлёт не принят — маршрут отменён")
         time.sleep(ALT / CLIMB_SPEED + SETTLE_S)
 
         scan(drone)
@@ -459,8 +468,13 @@ def main():
         # Взлетели — обязаны сесть, чем бы ни кончился маршрут.
         try:
             print("ПОСАДКА", flush=True)
-            resp = drone.control.land(timeout=10.0)
-            print("land:", resp.success, resp.message, flush=True)
+            try:
+                resp = drone.control.land()
+            except TypeError:               # сборка со старой сигнатурой
+                resp = drone.control.land(timeout=10.0)
+            print("land:", getattr(resp, "success", "?"), getattr(resp, "message", ""),
+                  flush=True)
+            time.sleep(8.0)                 # дать сесть, прежде чем гасить ноду
         finally:
             drone.close()
 
