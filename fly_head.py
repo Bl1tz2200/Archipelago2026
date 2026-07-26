@@ -51,7 +51,8 @@ ALT = 1.5           # высота полёта, м (потолок по рег�
 # не долетается или снимок делается на ходу, поднимать надо HOP_PAD, а не это.
 SPEED = 0.8         # скорость перелёта, м/с
 CLIMB_SPEED = 0.3   # скорость набора высоты — медленнее горизонтальной, взлёт мягче
-YAW = 0.0           # курс держим постоянным весь полёт, рад
+YAW = 0.0           # курс на взлёте: 0 при frame_id="body" — «не менять». Дальше курс
+                    # держится не этим, а доворотом по метке, см. YAW_FIX ниже
 
 # Взлёт: пока дрон качает после набора высоты, командовать ему нельзя — наведение
 # по прыгающей в кадре метке только раскачивает сильнее. Поэтому сначала ждём,
@@ -68,6 +69,15 @@ STEP_M = 1.0        # расстояние между центрами сосе�
 MARKER_M = 0.325    # сторона метки, м — по ней кадр переводится в метры (замер рулеткой)
 STEP_TOL = 0.3      # замер шага сетки принимается, если расходится с STEP_M не больше этого
 TURN_MAX = 45.0     # поправка курса больше этой — не увод дрона, а повёрнутая метка, град
+# Дрон потихоньку доворачивается сам — так ведёт себя эта сборка, и `yaw=0.0` при
+# frame_id="body" его не держит: по документации это «не менять курс», то есть каждая
+# команда закрепляет тот курс, который уже накопился. Раньше увод только
+# КОМПЕНСИРОВАЛСЯ (to_body разворачивала вектор перелёта, и дрон летел правильно, но
+# боком), а теперь ещё и ОТРАБАТЫВАЕТСЯ: с каждой командой дрон подворачивается назад
+# к курсу взлёта. Курс, как и всё остальное здесь, читается с метки — по её повороту
+# в кадре, без телеметрии и без отдельной команды разворота.
+YAW_DEAD = 3.0      # увод меньше этого не трогаем: шум опознания метки, а не поворот, град
+YAW_FIX = 15.0      # предел доворота за одну команду, град — как ALT_FIX для высоты
 
 TOL = 0.08          # «над целью»: смещение меньше этой доли диагонали кадра
 TRIES = 8           # попыток довести дрон до одной метки, дальше — следующий узел
@@ -378,10 +388,35 @@ def turn_error(angle):
 def to_body(forward, left, angle):
     """Вектор из осей поля в оси корпуса с учётом того, что дрон отвернуло."""
     error = turn_error(angle)
-    if abs(error) < math.radians(3):        # мелочь, не крутим
+    if abs(error) < math.radians(YAW_DEAD):     # мелочь, не крутим
         return forward, left
     c, s = math.cos(error), math.sin(error)
     return forward * c + left * s, -forward * s + left * c
+
+
+def hold_yaw(angle):
+    """Доворот к курсу взлёта для очередной команды navigate, радианы.
+
+    Ровно то же, что hold_alt делает с высотой, только для курса: замер снимается с
+    метки, а поправка отдаётся ближайшей же команде перелёта — отдельной команды
+    разворота не нужно, у navigate для этого есть свой аргумент.
+
+    Знак. `turn_error` даёт увод ПРОТИВ часовой (проверено дважды: по развороту метки
+    в осях кадра и по матрице в to_body), а положительный yaw в body — это тоже против
+    часовой (в документации `set_yaw(-pi/2)` описан как поворот по часовой). Значит
+    отработать увод — это скомандовать ему обратный знак.
+
+    Отдаём не весь увод разом, а не больше YAW_FIX: дрон крутится и летит по одной и
+    той же команде, и на большом довороте кадр смазывается сильнее, чем стоит того
+    выигрыш. Мелочь внутри YAW_DEAD не трогаем вовсе — иначе дрон дёргался бы на шуме
+    опознания метки. Увод неправдоподобно большой (повёрнутая метка на поле) уже
+    отсеян в `turn_error`, и здесь придёт нулём.
+    """
+    error = turn_error(angle)
+    if abs(error) < math.radians(YAW_DEAD):
+        return 0.0
+    limit = math.radians(YAW_FIX)
+    return max(-limit, min(limit, -error))
 
 
 def grid_step(seen, side):
@@ -541,10 +576,17 @@ def figure_route(corner_id):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def fly(drone, forward, left, up=0.0):
-    """Смещение по корпусу: x вперёд, y влево, z вверх. Команда и пауза — как в примере."""
+def fly(drone, forward, left, up=0.0, turn=0.0):
+    """Смещение по корпусу: x вперёд, y влево, z вверх, turn — доворот курса.
+
+    Команда и пауза — как в примере из документации; `turn` уходит в тот же navigate
+    штатным аргументом `yaw`, отдельной команды разворота не появляется.
+    """
     distance = math.hypot(forward, left)
-    if distance < 0.05 and abs(up) < 0.05:
+    # Доворот проверяется наравне со смещением: дрон, уже стоящий над целью, никуда
+    # не летит — и без этой проверки накопленный увод курса не отрабатывался бы
+    # ровно там, где его важнее всего убрать, на зависании.
+    if distance < 0.05 and abs(up) < 0.05 and abs(turn) < math.radians(YAW_DEAD):
         return
 
     # Одна команда длиннее пары шагов сетки — это почти всегда ошибка: не та метка
@@ -562,7 +604,7 @@ def fly(drone, forward, left, up=0.0):
     # и гасло в обработчике узла, так что полёт продолжался с неуправляемым дроном.
     try:
         resp = drone.control.navigate(x=float(forward), y=float(left), z=float(up),
-                                      yaw=YAW, speed=SPEED, frame_id="body",
+                                      yaw=float(turn), speed=SPEED, frame_id="body",
                                       auto_arm=False)
         refused = resp is not None and not getattr(resp, "success", True)
         why = getattr(resp, "message", "")
@@ -704,6 +746,7 @@ def climb(drone):
     BLIND_UP += LOOK_UP
     print(f"          меток не видно — поднимаемся осмотреться (+{BLIND_UP:.1f} м)",
           flush=True)
+    # Курс тут не доворачиваем: читать его тоже не с чего, метки в кадре нет.
     fly(drone, 0.0, 0.0, LOOK_UP)
 
 
@@ -801,11 +844,13 @@ def approach(drone, colour, deadline=None):
         where = place(base, x, y)
 
         if math.hypot(x - cx, y - cy) <= TOL * math.hypot(width, height):
-            fly(drone, 0.0, 0.0, hold_alt(base[1][2]))   # над яблоком — вернуть высоту
+            # Над яблоком — вернуть высоту и курс.
+            fly(drone, 0.0, 0.0, hold_alt(base[1][2]), hold_yaw(base[1][3]))
             return where, True
         # GAIN < 1: не отрабатываем весь промах разом, иначе дрон проскакивает цель.
         scale = MARKER_M / base[1][2] * GAIN
-        fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(base[1][2]))
+        fly(drone, -(y - cy) * scale, -(x - cx) * scale,
+            hold_alt(base[1][2]), hold_yaw(base[1][3]))
     return where, False
 
 
@@ -904,19 +949,20 @@ def goto(drone, target, found, deadline=None, tol=None, tries=None, hunt=True):
             continue
 
         if target in seen:
-            x, y, side, _ = seen[target]
+            x, y, side, angle = seen[target]
             grounded(side)
             if math.hypot(x - cx, y - cy) <= tol * math.hypot(width, height):
                 print(f"          над меткой {target}", flush=True)
-                # Встали над меткой — заодно вернём высоту, если её увело.
-                fly(drone, 0.0, 0.0, hold_alt(side))
+                # Встали над меткой — заодно вернём высоту и курс, если их увело.
+                fly(drone, 0.0, 0.0, hold_alt(side), hold_yaw(angle))
                 return True
             # Пиксели в метры — по стороне самой метки. Камера смотрит вниз:
             # верх кадра — это «вперёд», левый край — «влево».
             # GAIN < 1: отрабатываем не весь промах разом, иначе дрон проскакивает
             # цель и начинает качаться от команды к команде.
             scale = MARKER_M / side * GAIN
-            fly(drone, -(y - cy) * scale, -(x - cx) * scale, hold_alt(side))
+            fly(drone, -(y - cy) * scale, -(x - cx) * scale,
+                hold_alt(side), hold_yaw(angle))
             continue
 
         # Цели в кадре нет — идём к ней по карте от той метки, что видно.
@@ -943,7 +989,8 @@ def goto(drone, target, found, deadline=None, tol=None, tries=None, hunt=True):
         fly(drone,
             forward - (y - cy) * scale,
             left - (x - cx) * scale,
-            hold_alt(side))
+            hold_alt(side),
+            hold_yaw(angle))
 
     print(f"          узел {target} пропущен", flush=True)
     return False
